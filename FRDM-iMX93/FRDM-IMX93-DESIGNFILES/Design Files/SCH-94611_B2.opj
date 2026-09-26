@@ -1,0 +1,71 @@
+(ExpressProject ""
+  (ProjectVersion "19981106")
+  (SoftwareVersion "17.4-2019 S029 (4024845)  [4/15/2022]-[12/20/24]")
+  (ProjectType "PCB")
+  (Folder "Design Resources"
+    (Folder "Library")
+    ("Allegro Netlist Directory" "allegro")
+    (File ".\sch-94611_b2.dsn"
+      (Type "Schematic Design"))
+    (BuildFileAddedOrDeleted "x")
+    (CompileFileAddedOrDeleted "x")
+    (DOCKED "TRUE")
+    (DOCKING_POSITION "59420")
+    (NoModify)
+    (BOM_Scope "0")
+    (BOM_Mode "0")
+    (BOM_Report_File
+       "D:\公司项目\IMX93\一体板\FRDM-IMX93_B改版\FRDM-IMX93_DESIGNFILES-NXP_NEWLOGO-B2\FRDM-IMX93_DESIGNFILES-NXP_NEWLOGO_B2\SCHEMATIC\SCH-94611_B2\SCH-94611_B2.BOM")
+    (BOM_Merge_Include "FALSE")
+    (BOM_Property_Combine_7.0
+       "{Item}\t{Quantity}\t{AGILE_PN}\t{ASSY_OPT}\t{Reference}\t{Value}\t{DESCRIPTION}\t{MFG_NAME01}\t{MFG_PN01}\t{PCB Footprint}")
+    (BOM_Header
+       "Item\tQuantity\tAgilePN\tASSY_OPT\tReference\tValue\tDescription\tMfg Name\tMfg Part Number\tPCB Footprint")
+    (BOM_Include_File
+       "D:\公司项目\IMX93\一体板\FRDM-IMX93_B改版\FRDM-IMX93_DESIGNFILES-NXP_NEWLOGO-B2\FRDM-IMX93_DESIGNFILES-NXP_NEWLOGO_B2\SCHEMATIC\SCH-94611_B2\SCH-94611_B2.INC")
+    (BOM_Include_File_Combine_7.0 "{Item}\t{Quantity}\t{Reference}\t{Value}")
+    (BOM_One_Part_Per_Line "FALSE")
+    (Open_BOM_in_Excel "TRUE")
+    (BOM_View_Output "FALSE"))
+  (Folder "Layout")
+  (Folder "Outputs"
+    (File ".\sch-94611_b2.bom"
+      (Type "Report")))
+  (Folder "Referenced Projects")
+  (Folder "PSpice Resources"
+    (Folder "Simulation Profiles")
+    (Folder "Model Libraries"
+      (Sort User))
+    (Folder "Stimulus Files"
+      (Sort User))
+    (Folder "Include Files"
+      (Sort User)))
+  (Folder "Logs")
+  (PartMRUSelector)
+  (MPSSessionName "nxf95735")
+  (GlobalState
+    (FileView
+      (Path "Design Resources")
+      (Path "Design Resources" ".\sch-94611_b2.dsn")
+      (Path "Design Resources" ".\sch-94611_b2.dsn"
+         "FRDM-i.MX 93 Development Board")
+      (Path "Outputs")
+      (Select "Design Resources" ".\sch-94611_b2.dsn"
+         "FRDM-i.MX 93 Development Board" "E-07 CPU MISC"))
+    (HierarchyView)
+    (Doc
+      (Type "COrCapturePMDoc")
+      (Frame
+        (Placement "44 0 1 -1 -1 -1 -1 0 345 0 738"))
+      (Tab 0))
+    (Doc
+      (Type "COrSchematicDoc")
+      (Frame
+        (Placement "44 0 1 -1 -1 -1 -1 5 1283 26 781")
+        (Scroll "0 0")
+        (Zoom "100")
+        (Occurrence "/"))
+      (Path
+         "C:\ZIXU\FRDM-IMX93\FRDM-IMX93_DESIGNFILES-NXP_B2\SCHEMATIC\SCH-94611_B2\SCH-94611_B2.DSN")
+      (Schematic "FRDM-i.MX 93 Development Board")
+      (Page "E-07 CPU MISC"))))

@@ -1,0 +1,13 @@
+{ Using PSTWRITER 17.4.0 d001Sep-04-2024 at 12:34:20 }
+
+#1 WARNING(ORCAP-36038): "No_connect" property on Pin "P13.4" ignored for P13: FRDM-i.MX 93 Development Board, E-20 EXP/MicroSD/ADC (7.50, 7.95). Connecting pin to net "VSD_3V3".
+INFO(ORCAP-36080): Scanning netlist files ...
+
+Loading... C:\chonglang\Gerber\allegro\pstchip.dat
+
+Loading... C:\chonglang\Gerber\allegro\pstchip.dat
+
+Loading... C:\chonglang\Gerber\allegro\pstxprt.dat
+
+Loading... C:\chonglang\Gerber\allegro\pstxnet.dat
+packaging the design view...
