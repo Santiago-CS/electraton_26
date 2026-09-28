@@ -80,10 +80,11 @@ El sistema eléctrico del monoplaza opera bajo una estricta segregación galván
 Un **Pull Request (PR)** es una solicitud formal para que los líderes del área técnica revisen, validen y aprueben tus cambios antes de mezclarlos con el trabajo de los demás. **Nadie sube cambios directos a la rama `main`.**
 
 ### 1. Estructura de Ramas Base
-* `main`: Producción oficial. Exclusiva para diseños probados y enviados a manufactura.
-* `hardware/dev`: Rama base donde se integran los cambios de circuitos, PCBs y librerías.
-* `firmware/dev`: Rama base para integración de código y librerías embebidas.
-* `docs/general`: Rama base para manuales, pinouts y reglamentos técnicos.
+* `main`: Producción oficial. Exclusiva para diseños probados y versiones finales enviadas a manufactura.
+* `hardware/dev`: Rama base donde se integran los cambios de circuitos, esquemáticos, PCBs y librerías EDA.
+* `firmware/dev`: Rama base para integración de código fuente embebido y librerías de control.
+* `tools/dev`: Rama base para scripts de telemetría en pista, procesamiento de datos y utilidades de configuración.
+* `docs/general`: Rama base para manuales de taller, diagramas de arnés, pinouts y notas técnicas.
 
 ---
 
@@ -115,8 +116,24 @@ git checkout -b firmware/nombre-tarea
 # Ejemplo: git checkout -b firmware/lectura-pedal-adc
 ```
 
+* **Si vas a desarrollar scripts / herramientas / telemetría:**
+```bash
+git checkout tools/dev
+git pull origin tools/dev
+git checkout -b tools/nombre-tarea
+# Ejemplo: git checkout -b tools/parser-telemetria-serial
+```
+
+* **Si vas a actualizar documentación o diagramas:**
+```bash
+git checkout docs/general
+git pull origin docs/general
+git checkout -b docs/nombre-tarea
+# Ejemplo: git checkout -b docs/diagrama-arnes-potencia
+```
+
 #### Paso 3: Guardar cambios y crear commits limpios
-Agrega únicamente los archivos pertinentes (esquemáticos, archivos de código, modelos 3D). Evita archivos temporales o autogenerados:
+Agrega únicamente los archivos pertinentes (esquemáticos, código fuente, scripts, modelos 3D). Evita subir archivos temporales, respaldos locales o cachés de compilación:
 ```bash
 git status
 git add hardware/ecu/archivo_modificado.kicad_sch
@@ -127,10 +144,12 @@ git commit -m "feat(ecu): agregar diodo de proteccion contra polaridad inversa"
 * `feat(módulo):` nueva función, circuito o subsistema.
 * `fix(módulo):` corrección de errores, trazos de PCB o bugs de software.
 * `docs(módulo):` diagramas de cableado, notas de conexionado o manuales.
+* `tools(módulo):` scripts de adquisición, análisis o utilerías de pista.
 
 #### Paso 4: Subir tu rama a GitHub
 ```bash
-git push -u origin hardware/nombre-tarea
+git push -u origin <nombre-completo-de-tu-rama>
+# Ejemplo: git push -u origin hardware/filtro-alimentacion-ecu
 ```
 
 ---
@@ -141,32 +160,38 @@ git push -u origin hardware/nombre-tarea
 1. Entra al enlace del repositorio en GitHub desde tu navegador.
 2. Verás un recuadro amarillo con el botón **"Compare & pull request"**. Haz clic ahí. (Si no aparece, entra a la pestaña **Pull requests** y presiona **New pull request**).
 3. **Selección de ramas (Punto crítico):**
-   * **Base (izquierda):** Selecciona la rama destino (`hardware/dev` o `firmware/dev`). **No selecciones `main`** a menos que sea una entrega final de temporada.
-   * **Compare (derecha):** Selecciona tu rama (`hardware/nombre-tarea` o `firmware/nombre-tarea`).
+   * **Base (izquierda):** Selecciona la rama destino según tu área (`hardware/dev`, `firmware/dev`, `tools/dev` o `docs/general`). **No selecciones `main`** a menos que sea una entrega formal de temporada.
+   * **Compare (derecha):** Selecciona tu rama de trabajo personal (`hardware/nombre-tarea`, `firmware/nombre-tarea`, etc.).
 4. **Título y Descripción:**
    * Título corto y descriptivo: `feat(ecu): Proteccion contra polaridad inversa y desacoplo`.
-   * Descripción: Explica qué problema resuelve, qué pruebas hiciste (en simulador o banco de pruebas) y si cambiaste algún número de parte en la BOM.
+   * Descripción: Explica qué problema resuelve, qué pruebas realizaste (simulación, osciloscopio o banco de pruebas) y si modificaste algún componente en la BOM.
 5. **Revisores:** En la columna lateral derecha, en **Reviewers**, asigna al **Senior Chief Engineer** o al **Capitán de Área Técnica**.
 6. Haz clic en **Create pull request**.
 
 #### Opción B: Desde la terminal usando GitHub CLI (`gh`)
-Si tienes instalada la herramienta oficial de GitHub en la terminal:
+Si tienes instalada la herramienta oficial de GitHub en tu consola:
 ```bash
 # Para hardware apuntando a hardware/dev:
 gh pr create --base hardware/dev --title "feat(ecu): proteccion inversa" --body "Se agrega diodo y capacitor de desacoplo en entrada de 12V"
 
 # Para firmware apuntando a firmware/dev:
 gh pr create --base firmware/dev --title "feat(pedal): calibracion ADC" --body "Lectura lineal de pedal con debounce y promedio movil"
+
+# Para herramientas apuntando a tools/dev:
+gh pr create --base tools/dev --title "feat(telemetria): script de lectura serial" --body "Parser de tramas UART y almacenamiento en CSV"
+
+# Para documentación apuntando a docs/general:
+gh pr create --base docs/general --title "docs(arnes): pinout conector principal" --body "Actualizacion de diagrama de pines de alimentacion y sensores"
 ```
 
 #### Paso 5: ¿Qué pasa si te piden correcciones en la revisión?
-No cierres el PR ni crees otra rama. Simplemente realiza los cambios en tus archivos locales dentro de la misma rama y vuelve a hacer commit y push:
+No cierres el PR ni generes una nueva rama. Aplica las correcciones en tus archivos locales dentro de tu misma rama de trabajo, guarda los cambios y vuelve a enviar el push:
 ```bash
 git add hardware/ecu/archivo_corregido.kicad_sch
 git commit -m "fix(ecu): corregir espaciado de pistas segun observaciones"
-git push origin hardware/nombre-tarea
+git push origin <nombre-completo-de-tu-rama>
 ```
-El Pull Request en GitHub se actualizará automáticamente con los nuevos cambios. Una vez aprobado por los revisores, ellos realizarán el **Merge** a la rama de desarrollo correspondiente.
+El Pull Request en GitHub se actualizará automáticamente con el nuevo commit. Cuando los revisores den su visto bueno, realizarán el **Merge** formal hacia la rama de desarrollo correspondiente.
 
 ---
 
