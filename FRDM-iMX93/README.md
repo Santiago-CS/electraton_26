@@ -1,6 +1,6 @@
-# Guía de Configuración: i.MX93 EVK con VS Code, Red Punto a Punto y Optimización de Memoria
+# Guía de Configuración: i.MX93 EVK con VS Code, PowerShell, Red Punto a Punto y Optimización de Memoria
 
-Esta guía documenta la configuración completa de la placa **NXP i.MX93 EVK** para desarrollo con conexión directa por cable Ethernet hacia la PC, asignación automática de IP por DHCP (vía `dnsmasq`), autenticación por llave SSH, expansión de almacenamiento, memoria Swap y conexión remota con Visual Studio Code.
+Esta guía documenta la configuración completa de la placa **NXP i.MX93 EVK** para desarrollo con conexión directa por cable Ethernet hacia la PC, asignación automática de IP por DHCP (vía `dnsmasq`), autenticación por llave SSH, expansión de almacenamiento, memoria Swap y conexión remota tanto desde **Visual Studio Code** como desde **PowerShell**.
 
 ---
 
@@ -38,25 +38,54 @@ dnsmasq -C /root/imxrouter.conf
 
 ## 2. Autenticación SSH sin Contraseña (Llaves RSA)
 
-Para habilitar login directo y seguro desde Visual Studio Code sin pedir contraseña en cada reconexión:
+Para habilitar login directo y seguro sin ingresar la contraseña en cada conexión:
 
-### En la PC Host (PowerShell o CMD)
-1. Generar el par de llaves (si no existe):
-   ```cmd
+### En la PC Host (PowerShell)
+1. Generar el par de llaves (si no existe una previa):
+   ```powershell
    ssh-keygen -t rsa -b 4096
    ```
 2. Transferir la llave pública a la placa:
-   ```cmd
-   type %USERPROFILE%\.ssh\id_rsa.pub | ssh root@192.168.10.1 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
-   ```
-3. Comprobar acceso directo:
-   ```cmd
-   ssh root@192.168.10.1
+   ```powershell
+   type $env:USERPROFILE\.ssh\id_rsa.pub | ssh root@192.168.10.1 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
    ```
 
 ---
 
-## 3. Configuración de Visual Studio Code (Remote - SSH)
+## 3. Conexión Directa desde PowerShell
+
+Si prefieres trabajar desde la terminal de Windows sin abrir Visual Studio Code:
+
+### Acceso a la Consola Interactiva
+```powershell
+ssh root@192.168.10.1
+```
+*(Si ya configuraste el alias en el archivo `config` de SSH, puedes entrar simplemente con `ssh imx93`).*
+
+### Ejecución de Comandos Remotos (sin entrar a la shell interactiva)
+```powershell
+# Ver uso de memoria
+ssh root@192.168.10.1 "free -m"
+
+# Iniciar un script en segundo plano
+ssh root@192.168.10.1 "python3 /root/IRT/DSSE_Project.py"
+```
+
+### Transferencia Rápida de Archivos con SCP
+```powershell
+# Enviar un archivo desde la PC hacia la placa
+scp .\script.py root@192.168.10.1:/root/IRT/
+
+# Descargar un archivo desde la placa hacia la PC
+scp root@192.168.10.1:/root/test_cam.jpg .\test_cam.jpg
+
+# Descargar una carpeta completa
+scp -r root@192.168.10.1:/root/IRT/ .\respaldo_proyecto\
+```
+
+---
+
+## 4. Configuración de Visual Studio Code (Remote - SSH)
 
 ### Archivo de Configuración SSH (`~/.ssh/config`)
 En la PC, edita `C:\Users\<TuUsuario>\.ssh\config` para registrar el host y configurar los parámetros de latido (*KeepAlive*), evitando que la conexión caiga por inactividad:
@@ -77,7 +106,7 @@ Host imx93
 
 ---
 
-## 4. Expansión de Partición de la MicroSD
+## 5. Expansión de Partición de la MicroSD (32 GB)
 
 Las imágenes BSP grabadas en la MicroSD vienen por defecto con tamaño fijo (~8.6 GB), dejando el resto de la tarjeta sin usar:
 
@@ -92,7 +121,7 @@ df -h /
 
 ---
 
-## 5. Creación y Activación de Memoria Swap (2 GB)
+## 6. Creación y Activación de Memoria Swap (2 GB)
 
 Para evitar que el kernel active el *OOM Killer* y cuelgue la placa debido al consumo de RAM del servidor de VS Code y extensiones de Python:
 
@@ -114,7 +143,7 @@ free -m
 
 ---
 
-## 6. Optimización de VS Code para Placas Embebidas
+## 7. Optimización de VS Code para Placas Embebidas
 
 Para evitar sobrecargar los núcleos Cortex-A55 y la memoria RAM:
 
@@ -126,11 +155,11 @@ Para evitar sobrecargar los núcleos Cortex-A55 y la memoria RAM:
 
 ---
 
-## 7. Desconexión y Apagado Seguro
+## 8. Desconexión y Apagado Seguro
 
 Para evitar corromper los bloques del sistema de archivos en la tarjeta MicroSD:
 
-1. En VS Code, haz clic en la esquina inferior izquierda (`SSH: imx93`) y presiona **Close Remote Connection**.
+1. En VS Code, haz clic en la esquina inferior izquierda (`SSH: imx93`) y presiona **Close Remote Connection** (o sal de PowerShell con `exit`).
 2. En la terminal de la placa, apaga el sistema de forma controlada:
    ```bash
    poweroff
