@@ -75,6 +75,101 @@ El sistema eléctrico del monoplaza opera bajo una estricta segregación galván
 
 ---
 
+## 🌿 Flujo de Trabajo con Git y Creación de Pull Requests (PR)
+
+Un **Pull Request (PR)** es una solicitud formal para que los líderes del área técnica revisen, validen y aprueben tus cambios antes de mezclarlos con el trabajo de los demás. **Nadie sube cambios directos a la rama `main`.**
+
+### 1. Estructura de Ramas Base
+* `main`: Producción oficial. Exclusiva para diseños probados y enviados a manufactura.
+* `hardware/dev`: Rama base donde se integran los cambios de circuitos, PCBs y librerías.
+* `firmware/dev`: Rama base para integración de código y librerías embebidas.
+* `docs/general`: Rama base para manuales, pinouts y reglamentos técnicos.
+
+---
+
+### 2. Flujo Completo por Terminal
+
+#### Paso 1: Clonar y actualizar el repositorio local
+```bash
+git clone <URL_DEL_REPOSITORIO>
+cd <NOMBRE_DEL_REPO>
+git fetch --all
+```
+
+#### Paso 2: Crear tu rama personal de trabajo
+Sitúate en la rama base de tu disciplina y crea una rama específica para tu tarea:
+
+* **Si vas a diseñar hardware (esquemático/PCB):**
+```bash
+git checkout hardware/dev
+git pull origin hardware/dev
+git checkout -b hardware/nombre-tarea
+# Ejemplo: git checkout -b hardware/filtro-alimentacion-ecu
+```
+
+* **Si vas a programar firmware:**
+```bash
+git checkout firmware/dev
+git pull origin firmware/dev
+git checkout -b firmware/nombre-tarea
+# Ejemplo: git checkout -b firmware/lectura-pedal-adc
+```
+
+#### Paso 3: Guardar cambios y crear commits limpios
+Agrega únicamente los archivos pertinentes (esquemáticos, archivos de código, modelos 3D). Evita archivos temporales o autogenerados:
+```bash
+git status
+git add hardware/ecu/archivo_modificado.kicad_sch
+git commit -m "feat(ecu): agregar diodo de proteccion contra polaridad inversa"
+```
+
+*Convenciones de mensajes:*
+* `feat(módulo):` nueva función, circuito o subsistema.
+* `fix(módulo):` corrección de errores, trazos de PCB o bugs de software.
+* `docs(módulo):` diagramas de cableado, notas de conexionado o manuales.
+
+#### Paso 4: Subir tu rama a GitHub
+```bash
+git push -u origin hardware/nombre-tarea
+```
+
+---
+
+### 3. Cómo abrir y procesar el Pull Request (PR)
+
+#### Opción A: Desde la interfaz web de GitHub (Método estándar)
+1. Entra al enlace del repositorio en GitHub desde tu navegador.
+2. Verás un recuadro amarillo con el botón **"Compare & pull request"**. Haz clic ahí. (Si no aparece, entra a la pestaña **Pull requests** y presiona **New pull request**).
+3. **Selección de ramas (Punto crítico):**
+   * **Base (izquierda):** Selecciona la rama destino (`hardware/dev` o `firmware/dev`). **No selecciones `main`** a menos que sea una entrega final de temporada.
+   * **Compare (derecha):** Selecciona tu rama (`hardware/nombre-tarea` o `firmware/nombre-tarea`).
+4. **Título y Descripción:**
+   * Título corto y descriptivo: `feat(ecu): Proteccion contra polaridad inversa y desacoplo`.
+   * Descripción: Explica qué problema resuelve, qué pruebas hiciste (en simulador o banco de pruebas) y si cambiaste algún número de parte en la BOM.
+5. **Revisores:** En la columna lateral derecha, en **Reviewers**, asigna al **Senior Chief Engineer** o al **Capitán de Área Técnica**.
+6. Haz clic en **Create pull request**.
+
+#### Opción B: Desde la terminal usando GitHub CLI (`gh`)
+Si tienes instalada la herramienta oficial de GitHub en la terminal:
+```bash
+# Para hardware apuntando a hardware/dev:
+gh pr create --base hardware/dev --title "feat(ecu): proteccion inversa" --body "Se agrega diodo y capacitor de desacoplo en entrada de 12V"
+
+# Para firmware apuntando a firmware/dev:
+gh pr create --base firmware/dev --title "feat(pedal): calibracion ADC" --body "Lectura lineal de pedal con debounce y promedio movil"
+```
+
+#### Paso 5: ¿Qué pasa si te piden correcciones en la revisión?
+No cierres el PR ni crees otra rama. Simplemente realiza los cambios en tus archivos locales dentro de la misma rama y vuelve a hacer commit y push:
+```bash
+git add hardware/ecu/archivo_corregido.kicad_sch
+git commit -m "fix(ecu): corregir espaciado de pistas segun observaciones"
+git push origin hardware/nombre-tarea
+```
+El Pull Request en GitHub se actualizará automáticamente con los nuevos cambios. Una vez aprobado por los revisores, ellos realizarán el **Merge** a la rama de desarrollo correspondiente.
+
+---
+
 ## 🔒 Protocolos de Seguridad y Trabajo en Taller
 
 Todo trabajo desarrollado en este repositorio debe respetar de forma obligatoria las normas de seguridad del equipo:
@@ -91,14 +186,3 @@ Este repositorio contiene información técnica propietaria, sensible y confiden
 
 * Queda estrictamente prohibido clonar, transferir, duplicar, filtrar o exponer estos esquemáticos, diagramas o código a entidades ajenas al proyecto o a otras escuderías de competencia sin un **Convenio de Colaboración e Intercambio Técnico Oficial** firmado por el Team Principal, la Mesa Directiva y avalado por el responsable del PTI de ITESO.
 * Cualquier divulgación deliberada o no autorizada causará la apertura inmediata de un expediente disciplinario, la expulsión definitiva del equipo y el escalamiento a las autoridades académicas y al Comité de Ética del ITESO.
-
----
-
-## 👥 Contribuciones y Control de Versiones
-
-1. **Ramas (`branches`):**
-   * `main`: Código y versiones de PCB validadas y enviadas a manufactura. Protegida contra commits directos.
-   * `hardware/feature-name` o `firmware/feature-name`: Ramas de desarrollo para nuevos esquemáticos, correcciones de pistas o módulos de software.
-2. **Commits y Pull Requests:**
-   * Utilice mensajes de commit descriptivos (ej. `fix(ecu): corregir pull-up en línea de interlock`).
-   * Toda integración a `main` requiere la revisión y aprobación técnica del **Senior Chief Engineer** o del **Capitán de Área Técnica**.
