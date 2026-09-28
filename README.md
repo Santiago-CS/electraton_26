@@ -23,6 +23,13 @@ El sistema eléctrico del monoplaza opera bajo una estricta segregación galván
 ## 📁 Estructura del Repositorio
 
 ```text
+├── FRDM-iMX93/
+│   ├── 3D Printed Enclosure for FRDM-IMX93/
+│   └── FRDM-IMX93-DESIGNFILES/
+│       ├── 3D Module/
+│       ├── Design Files/
+│       ├── Gerbers/
+│       └── PDF/
 ├── docs/                   # Diagramas generales de cableado (harness), pinouts y notas técnicas
 ├── firmware/               # Proyectos de código fuente embebido (C / C++ / MicroPython)
 │   ├── ecu_firmware/       # Lógica principal de tracción y máquina de estados del auto
@@ -37,7 +44,13 @@ El sistema eléctrico del monoplaza opera bajo una estricta segregación galván
 
 ## 🛠️ Subsistemas de Hardware (Hardware Directory)
 
-### 1. `hardware/steering_wheel/`
+### 1. `FRDM-iMX93/`
+* **Función:** Plataforma de cómputo embebido y adquisición de datos basada en el procesador NXP i.MX93, empleada para telemetría avanzada, procesamiento y soporte de computación a bordo.
+* **Carpetas del módulo:**
+  * `3D Printed Enclosure for FRDM-IMX93/`: Archivos de diseño y modelos del gabinete / case para manufactura aditiva y montaje en el chasis.
+  * `FRDM-IMX93-DESIGNFILES/`: Archivos de diseño originales de la tarjeta de desarrollo (`3D Module/`, `Design Files/`, `Gerbers/`, `PDF/`).
+
+### 2. `hardware/steering_wheel/`
 * **Función:** Módulo de interfaz hombre-máquina (HMI) ubicado en el volante del monoplaza.
 * **Componentes Clave:** 
   * Microcontrolador para adquisición de comandos del piloto (pulsadores, selectores rotativos y palancas de cambios/frenado regenerativo).
@@ -48,7 +61,7 @@ El sistema eléctrico del monoplaza opera bajo una estricta segregación galván
   * Archivos Gerber de fabricación y ensamble (CPL/Pick and Place).
   * Lista de materiales (BOM) con números de parte y encapsulados.
 
-### 2. `hardware/ecu/`
+### 3. `hardware/ecu/`
 * **Función:** Unidad de Control Electrónico encargada de la lógica central del monoplaza y la máquina de estados de seguridad.
 * **Componentes Clave:**
   * Microcontrolador principal de gestión en tiempo real.
