@@ -1,4 +1,4 @@
-# IRT Speaker — procedural engine sound for the FRDM i.MX95 PRO
+# IRT Speaker — procedural engine sound for the FRDM i.MX93
 
 Synthesised engine note for an electric drivetrain. Reads the PMAC motor
 controller's CANopen feedback and plays a crossfaded, pitch-corrected sample
