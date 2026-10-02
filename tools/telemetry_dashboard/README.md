@@ -63,3 +63,67 @@ tools/telemetry_dashboard/
 ├── main.py                  # Punto de entrada de la aplicación
 ├── requirements.txt         # Dependencias del entorno
 └── README.md                # Documentación técnica del módulo
+```
+
+## 📦 Contrato de Datos (Formato CSV)
+
+La herramienta procesa archivos `.csv` exportados por el sistema de adquisición a bordo del monoplaza (procesados en el Cortex-A55 / Cortex-M33 de la tarjeta i.MX93). El archivo debe contener los siguientes encabezados:
+
+| Columna | Tipo | Unidad | Descripción |
+| :--- | :---: | :---: | :--- |
+| `timestamp_ms` | `int` | ms | Tiempo relativo desde el inicio del registro en milisegundos |
+| `distance_m` | `float` | m | Distancia integrada acumulada en pista por odometría |
+| `lat` | `float` | Grados | Latitud GPS en formato WGS84 decimal |
+| `lon` | `float` | Grados | Longitud GPS en formato WGS84 decimal |
+| `speed_kmh` | `float` | km/h | Velocidad lineal del monoplaza calculada |
+| `ax_g` | `float` | g | Aceleración longitudinal (+ aceleración, - frenada) |
+| `ay_g` | `float` | g | Aceleración lateral (+ curvas izquierda, - curvas derecha) |
+| `yaw_rate_dps` | `float` | deg/s | Velocidad angular de guiñada del chasis |
+| `motor_rpm` | `float` | RPM | Revoluciones por minuto del motor de tracción |
+| `throttle_pct` | `float` | % | Apertura o porcentaje del pedal de acelerador (0 a 100) |
+| `brake_bar` | `float` | bar | Presión en la línea del circuito hidráulico de freno |
+| `motor_temp_c` | `float` | °C | Temperatura interna en carcasa/devanados del motor |
+| `battery_temp_c` | `float` | °C | Temperatura máxima registrada en módulos de celdas |
+| `pack_voltage_v` | `float` | V | Tensión total del banco de acumuladores de tracción |
+| `pack_current_a` | `float` | A | Corriente demandada instantánea entregada al inversor |
+| `lap_number` | `int` | - | Identificador de vuelta computado (1, 2, 3...) |
+
+---
+
+## 🚀 Instalación y Ejecución
+
+### 1. Requisitos Previos
+* **Python 3.10 o superior**.
+* Entorno virtual de Python recomendado.
+
+### 2. Instalación de Dependencias
+Desde la raíz del repositorio (`electraton_26/`):
+
+```bash
+pip install -r tools/telemetry_dashboard/requirements.txt
+```
+
+### 3. Ejecución de la Suite
+Ejecuta la suite como módulo de Python desde la raíz del proyecto:
+
+```bash
+python -m tools.telemetry_dashboard.main
+```
+
+### 4. Generación y Carga de Sesiones de Prueba (Mock Data)
+Para probar todas las funciones sin conectar hardware físico:
+
+* Dentro de la aplicación, haz clic en el botón superior "🏁 Test Óscar Casillas (10 Vueltas)".
+* O genera el log directamente por terminal:
+
+```bash
+python -m tools.telemetry_dashboard.core.mock_source
+```
+
+>El archivo se guardará automáticamente en tools/telemetry_dashboard/casillas_10_laps.csv y podrá abrirse con el botón 📂 Abrir Stint (.csv).
+
+## 👥 Flujo de Desarrollo y Control de Versiones
+
+* **Rama base:** Todo desarrollo de utilerías debe partir e integrarse a la rama `tools/dev`.
+* **Rama de trabajo:** Ramas de tarea bajo la convención `tools/<nombre-tarea>` (ej. `tools/telemetry-gui-dashboard`).
+* **Pull Requests:** Los cambios deben dirigirse a `tools/dev` mediante PR convencional y requieren la validación técnica del **Senior Chief Engineer** o del **Capitán de Área Técnica**. Está prohibido realizar commits directos a `main`.
