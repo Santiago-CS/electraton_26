@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+tools/telemetry_dashboard/__pycache__/
+tools/telemetry_dashboard/*/__pycache__/
+*.csv
