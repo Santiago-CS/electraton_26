@@ -1,0 +1,33 @@
+# --- Build output --------------------------------------------------------
+# One directory per CMake preset in CMakePresets.json (binaryDir = presetName).
+/debug/
+/release/
+
+# --- Per-machine MCUXpresso files ----------------------------------------
+# These hold absolute paths to this machine's SDK, toolchain and Python venv,
+# so they are wrong on anyone else's. The MCUXpresso for VS Code extension
+# regenerates them when the project is imported.
+#
+# __repo__ is a symlink to the local SDK checkout.
+/__repo__
+# Included by CMakePresets.json, so `cmake --preset debug` on a fresh clone
+# needs it recreated first (re-import in the extension, or copy one from a
+# working machine and fix the paths).
+/mcux_include.json
+# The other .vscode files carry no machine paths and stay tracked.
+/.vscode/mcuxpresso-tools.json
+
+# --- Compiler by-products outside the build directory --------------------
+# -fstack-usage writes a .su file into the working directory when the object
+# goes to /dev/null, which is how stray ones end up in the project root.
+*.su
+
+# --- Python (tools/) ------------------------------------------------------
+__pycache__/
+*.pyc
+
+# --- Editors / OS -----------------------------------------------------------
+*.swp
+*.swo
+*~
+.DS_Store
