@@ -1,0 +1,18 @@
+# KiCad per-user state, not part of the design
+*.kicad_prl
+*-backups/
+fp-info-cache
+# KiCad's local history: its own git repo, recreated on every save.
+# Committing it would add an embedded-repo gitlink that no clone can resolve.
+.history/
+
+# generated output; keep the two files the design actually depends on
+build/*
+!build/kicad_netlist.net
+!build/placed.kicad_pcb
+
+__pycache__/
+*.py[cod]
+
+# SKiDL scratch
+skidl_REPL.*

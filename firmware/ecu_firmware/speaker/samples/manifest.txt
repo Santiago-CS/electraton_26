@@ -1,0 +1,16 @@
+# cross-plane V8, tone=sport
+# rpm  on_throttle.wav  off_throttle.wav   (ascending rpm)
+700.00 700_on.wav 700_off.wav
+900.00 900_on.wav 900_off.wav
+1150.01 1150_on.wav 1150_off.wav
+1449.99 1450_on.wav 1450_off.wav
+1800.00 1800_on.wav 1800_off.wav
+2200.00 2200_on.wav 2200_off.wav
+2650.01 2650_on.wav 2650_off.wav
+3149.98 3150_on.wav 3150_off.wav
+3700.00 3700_on.wav 3700_off.wav
+4300.00 4300_on.wav 4300_off.wav
+4900.00 4900_on.wav 4900_off.wav
+5500.00 5500_on.wav 5500_off.wav
+6100.00 6100_on.wav 6100_off.wav
+6700.00 6700_on.wav 6700_off.wav

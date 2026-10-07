@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "steering_wheel")(type "KiCad")(uri "${KIPRJMOD}/lib/steering_wheel.pretty")(options "")(descr "IRT steering wheel project footprints"))
+)
