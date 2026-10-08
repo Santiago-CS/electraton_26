@@ -44,6 +44,10 @@
 #define BMM350_REG_MAG_Z_XLSB        0x37U
 #define BMM350_REG_TEMP_XLSB         0x3AU
 #define BMM350_REG_SENSORTIME_XLSB   0x3DU
+#define BMM350_REG_OTP_CMD           0x50U
+#define BMM350_REG_OTP_DATA_MSB      0x52U
+#define BMM350_REG_OTP_DATA_LSB      0x53U
+#define BMM350_REG_OTP_STATUS        0x55U
 #define BMM350_REG_CMD               0x7EU
 
 /* ---- CHIP_ID ------------------------------------------------------------ */
@@ -62,6 +66,22 @@
 #define BMM350_PMU_CMD_FGR_FAST 0x06U
 #define BMM350_PMU_CMD_BR       0x07U /*!< bit reset */
 #define BMM350_PMU_CMD_BR_FAST  0x08U
+
+/* ---- PMU_CMD_STATUS_0 --------------------------------------------------- */
+#define BMM350_PMU_STATUS_BUSY       (1U << 0) /*!< previous PMU command still running */
+#define BMM350_PMU_STATUS_ODR_OVWR   (1U << 1)
+#define BMM350_PMU_STATUS_AVR_OVWR   (1U << 2)
+#define BMM350_PMU_STATUS_NORMAL     (1U << 3) /*!< part is in normal mode */
+#define BMM350_PMU_STATUS_ILLEGAL    (1U << 4) /*!< last PMU command was rejected */
+#define BMM350_PMU_STATUS_CMD_SHIFT  5U        /*!< [7:5] last PMU command accepted */
+
+/* ---- OTP_CMD ------------------------------------------------------------ */
+/*
+ * The OTP holds Bosch's factory compensation and is powered after boot.
+ * Bosch's reference init powers it off once the compensation has been read,
+ * before taking any measurement.
+ */
+#define BMM350_OTP_CMD_PWR_OFF_OTP 0x80U
 
 /* ---- PMU_CMD_AXIS_EN ---------------------------------------------------- */
 #define BMM350_AXIS_EN_X   (1U << 0)

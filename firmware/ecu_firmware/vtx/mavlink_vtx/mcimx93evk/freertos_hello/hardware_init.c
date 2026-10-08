@@ -7,6 +7,7 @@
 #include "app.h"
 #include "board.h"
 #include "pin_mux.h"
+#include "rsc_table.h"
 /*${header:end}*/
 
 /*${function:start}*/
@@ -46,5 +47,9 @@ void BOARD_InitHardware(void)
     CLOCK_EnableClock(IMU_LPSPI_CLOCK_GATE);
 
     BOARD_InitDebugConsole();
+
+    /* RPMsg to Linux: the resource table must be at m_rsc_tbl before Linux
+     * looks for the vrings (comms/pmac_link.c). */
+    copyResourceTable();
 }
 /*${function:end}*/

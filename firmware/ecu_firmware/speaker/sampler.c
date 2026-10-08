@@ -1,12 +1,27 @@
 /*
- * sampler.c - RPM-indexed crossfading engine sound sampler.
+ * sampler.c - the IRT engine-sound program ("speaker"), and the RPM-indexed
+ * crossfading engine sampler it is built around.
  *
- * Realtime (ALSA):  gcc -O2 -o sampler sampler.c -lasound -lm
- * Offline render :  gcc -O2 -DOFFLINE -o sampler_off sampler.c -lm
- *                   ./sampler_off demo.wav
+ * One executable does everything on the board: reads the PMAC motor
+ * controller over CAN, decodes all of its frames (pmac.c), turns motor rpm and
+ * torque into a virtual engine (can_feed.c) and plays it through ALSA.
  *
- * Runtime chain:
+ *   gcc -O2 -o speaker sampler.c can_feed.c pmac.c -lasound -lm -lpthread
+ *
+ *   ./speaker              engine sound + PMAC decode printed live
+ *   ./speaker -q           engine sound only, prints nothing
+ *   ./speaker --help       all options
+ *
+ * Offline render (no CAN, no audio hardware):
+ *   gcc -O2 -DOFFLINE -o sampler_off sampler.c -lm
+ *   ./sampler_off demo.wav
+ *
+ * Runtime chain (CAN):
+ *   motor rpm + torque from the controller -> virtual gearbox (can_feed.c)
+ *   -> engine rpm + load
+ * Runtime chain (--sim / offline):
  *   throttle 0..255 -> torque -> crank inertia -> rpm
+ * Then, either way:
  *   rpm  -> pick bracketing sample pair, equal-power crossfade
  *   rpm  -> per-loop resample ratio so BOTH loops land on the exact target pitch
  *   load -> blend on-throttle vs off-throttle layer
@@ -25,6 +40,7 @@
 #ifndef OFFLINE
 #include <alsa/asoundlib.h>
 #endif
+#include "can_feed.h"
 
 #define SR         48000
 #define PERIOD     256
@@ -560,22 +576,21 @@ static int read_pedal(void)
 }
 #endif
 
+
 /* ================= main ================= */
 /* Define SAMPLER_NO_MAIN to reuse the sample bank and render() from another
  * program (drive_kbd.c does this). */
 #ifndef SAMPLER_NO_MAIN
+
+#ifdef OFFLINE
 int main(int argc, char **argv)
 {
-#ifndef OFFLINE
-    (void)argc; (void)argv;
-#endif
     const char *dir = getenv("V8_PACK") ? getenv("V8_PACK") : "samples";
     if (load_pack(dir)) return 1;
 
     float buf[PERIOD];
     const float Ts = (float)PERIOD / SR;
 
-#ifdef OFFLINE
     const char *outp = argc > 1 ? argv[1] : "demo.wav";
     const float dur = 30.0f;
     int total = (int)(dur * SR);
@@ -613,26 +628,286 @@ int main(int argc, char **argv)
     printf("wrote %s (%.1f s)\n", outp, (float)wrote / SR);
     return 0;
 
-#else
-    snd_pcm_t *pcm;
-    int err;
+}
+
+#else   /* ---------------- the board program: ./speaker ---------------- */
+
+#include <signal.h>
+#include <unistd.h>
+
+static void usage(const char *me)
+{
+    fprintf(stderr,
+"usage: %s [options] [can-if]\n"
+"\n"
+"  (no option)  engine sound from the PMAC on can0, PMAC decode printed live\n"
+"  -q           quiet: engine sound only, print nothing (errors still go to stderr)\n"
+"  -v           verbose decode: also SYNC, every heartbeat, unknown frames\n"
+"  --csv        decode as CSV on stdout, one row per 40 ms cycle\n"
+"  --no-audio   decode only, no sound\n"
+"  --sim        bench: simulated throttle ramp, no CAN\n"
+"  -r <log>     replay a candump log (- = stdin): decode + virtual gearbox, no sound\n"
+"  -n <id>      controller node id (default 1)\n"
+"  -T <Nm>      rated torque (2916h:01) to also show torque in Nm\n"
+"  -g <gain>    volume, 0.1 .. 2.0 (default 1.0, or $VOLUME) - same range as drive_kbd +/-\n"
+"\n"
+"  can-if       CAN interface (default: $CAN_IF, else can0)\n"
+"  environment  ALSA_DEV (default \"default\"), V8_PACK (default samples),\n"
+"               TONE_* (brightness shelf + low-pass, README 4.1)\n",
+            me);
+}
+
+static volatile sig_atomic_t stop = 0;
+static void on_signal(int sig) { (void)sig; stop = 1; }
+
+/* ---- what gets printed. All of this runs on the CAN thread (or in the
+ * replay loop), never in the audio loop. ---- */
+enum { OUT_TEXT, OUT_CSV, OUT_QUIET };
+static int             out_mode = OUT_TEXT;
+static pmac_print_opts popt     = { 0, 0.0 };
+static double          t_origin = -1.0;     /* first frame, for relative time */
+static double          t_status = -1e9;     /* last ENGINE line               */
+static unsigned long   n_frames = 0;
+static unsigned        csv_mask = 0;        /* TPDOs seen in this cycle       */
+static double          csv_t    = 0.0;
+static float           volume   = 1.0f;     /* -g, like drive_kbd's +/-       */
+static volatile float  g_tone_db = 0.0f;    /* tone shelf now, from the audio loop */
+static volatile int    g_audio   = 0;       /* audio running: show the tone   */
+
+static void engine_line(const Feed *e, double trel)
+{
+    printf("%9.4f  ENGINE %s  motor %5.0f rpm  torque %+6.3f  ->  gear %d"
+           "  engine %5.0f rpm  load %.2f",
+           trel, e->live ? "LIVE" : "DEAD", e->motor_rpm, e->torque, e->gear,
+           e->rpm, e->load);
+    if (g_audio)                        /* same readout as drive_kbd's status */
+        printf("  vol %.1f  tone %+5.1f dB", volume, g_tone_db);
+    printf("%s\n", e->shifting ? "  [shift]" : "");
+}
+
+static void csv_row(const pmac_state *st, const Feed *e)
+{
+    printf("%.6f", csv_t - t_origin);
+    pmac_csv_values(stdout, st, popt.rated_nm);
+    printf(",%.1f,%d,%.3f,%d\n", e->rpm, e->gear, e->load, e->live);
+}
+
+static void on_frame(const pmac_state *st, const Feed *e, frame_kind k,
+                     int which, double t, uint32_t id, int len, const uint8_t *d)
+{
+    if (k != FR_TICK) {
+        if (k != FR_CANERR) n_frames++;
+        if (t_origin < 0) t_origin = t;
+    }
+    double trel = t_origin < 0 ? 0.0 : t - t_origin;
+
+    if (out_mode == OUT_CSV) {
+        /* A cycle closes on the next SYNC, or when a TPDO repeats first. */
+        if (k == FR_SYNC) {
+            if (csv_mask) csv_row(st, e);
+            csv_mask = 0;
+        } else if (k == FR_TPDO) {
+            if (csv_mask & (1u << which)) { csv_row(st, e); csv_mask = 0; }
+            if (!csv_mask) csv_t = t;
+            csv_mask |= 1u << which;
+        }
+        return;
+    }
+
+    if (k == FR_TICK)
+        printf("%9.4f  ENGINE DEAD  no frames from the PMAC for 1 s"
+               " (key off, bus down, wrong bitrate?)\n", trel);
+    else {
+        pmac_print(stdout, st, k, which, trel, id, len, d, &popt);
+        if (t - t_status >= 1.0) {             /* one ENGINE line a second */
+            t_status = t;
+            engine_line(e, trel);
+        }
+    }
+    fflush(stdout);
+}
+
+static void finish(unsigned long nbad, const Feed *last)
+{
+    pmac_state s;
+    canfeed_set_hook(NULL);         /* returns once no hook call is running */
+    canfeed_snapshot(&s);
+    if (out_mode == OUT_CSV && csv_mask)
+        csv_row(&s, last);
+    fflush(stdout);
+    if (out_mode != OUT_QUIET)
+        pmac_summary(stderr, &s, t_origin, n_frames, nbad);
+}
+
+/* Replay: decode a candump log and run the gearbox at audio block rate on
+ * the log's own clock. Same code path as live, minus the socket and ALSA. */
+static int replay(const char *path, int node)
+{
+    FILE *in = strcmp(path, "-") ? fopen(path, "r") : stdin;
+    if (!in) { perror(path); return 1; }
+
+    const float dt = (float)PERIOD / SR;
+    char line[512];
+    double t = 0.0, clk = -1.0;
+    unsigned long nbad = 0;
+    Feed fb;
+    memset(&fb, 0, sizeof fb);
+
+    canfeed_init(node);
+    canfeed_set_hook(out_mode == OUT_QUIET ? NULL : on_frame);
+
+    while (!stop && fgets(line, sizeof line, in)) {
+        uint32_t id; int len; uint8_t d[8];
+        int r = pmac_parse_candump(line, &t, &id, &len, d);
+        if (r < 0) { nbad++; continue; }
+        if (r == 0) continue;
+        if (clk < 0) clk = t;
+        while (clk + dt <= t) {
+            clk += dt;
+            canfeed_update_at(&fb, dt, clk);
+        }
+        canfeed_frame(id, len, d, t);
+    }
+    if (in != stdin) fclose(in);
+    finish(nbad, &fb);
+    return 0;
+}
+
+/* stdout is for the decode (and must stay pure CSV with --csv), so the
+ * sample-pack banner goes to stderr while the pack loads. */
+static int load_pack_quietly(const char *dir)
+{
+    fflush(stdout);
+    int saved = dup(1);
+    dup2(2, 1);
+    int r = load_pack(dir);
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    return r;
+}
+
+int main(int argc, char **argv)
+{
+    int sim = 0, no_audio = 0, node = 1;
+    const char *replay_path = NULL;
+    const char *ifn = getenv("CAN_IF") ? getenv("CAN_IF") : "can0";
+    if (getenv("VOLUME")) volume = (float)atof(getenv("VOLUME"));
+
+    for (int a = 1; a < argc; a++) {
+        const char *o = argv[a];
+        if      (!strcmp(o, "-q"))                  out_mode = OUT_QUIET;
+        else if (!strcmp(o, "-v"))                  popt.verbose = 1;
+        else if (!strcmp(o, "--csv"))               out_mode = OUT_CSV;
+        else if (!strcmp(o, "--no-audio"))          no_audio = 1;
+        else if (!strcmp(o, "--sim"))               sim = 1;
+        else if (!strcmp(o, "-r") && a + 1 < argc)  replay_path = argv[++a];
+        else if (!strcmp(o, "-n") && a + 1 < argc)  node = atoi(argv[++a]);
+        else if (!strcmp(o, "-T") && a + 1 < argc)  popt.rated_nm = atof(argv[++a]);
+        else if (!strcmp(o, "-g") && a + 1 < argc)  volume = (float)atof(argv[++a]);
+        else if (!strcmp(o, "-h") || !strcmp(o, "--help")) { usage(argv[0]); return 0; }
+        else if (o[0] != '-')                       ifn = o;
+        else { usage(argv[0]); return 2; }
+    }
+    if (node < 1 || node > 127) { usage(argv[0]); return 2; }
+    if (!(volume >= 0.1f)) volume = 0.1f;          /* drive_kbd's range */
+    if (volume > 2.0f)     volume = 2.0f;
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;          /* no SA_RESTART: unblock reads/writes */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    if (out_mode == OUT_CSV) {
+        printf("t_s");
+        pmac_csv_header(stdout, popt.rated_nm);
+        printf(",engine_rpm,gear,load,live\n");
+    }
+
+    if (replay_path)
+        return replay(replay_path, node);
+
+    if (out_mode == OUT_QUIET && !freopen("/dev/null", "w", stdout))
+        return 1;
+
+    /* ---- audio ---- */
+    snd_pcm_t *pcm = NULL;
     const char *dev = getenv("ALSA_DEV") ? getenv("ALSA_DEV") : "default";
-
-    if ((err = snd_pcm_open(&pcm, dev, SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
-        fprintf(stderr, "open %s: %s\n", dev, snd_strerror(err)); return 1;
-    }
-    if ((err = snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE,
-                                  SND_PCM_ACCESS_RW_INTERLEAVED,
-                                  1, SR, 1, 20000)) < 0) {
-        fprintf(stderr, "params: %s\n", snd_strerror(err)); return 1;
-    }
-
+    float buf[PERIOD];
     int16_t out[PERIOD];
-    for (;;) {
-        engine_step(read_pedal(), Ts);
-        render(buf, PERIOD, w * 9.5493f, u_f);
+    const float Ts = (float)PERIOD / SR;
+
+    if (!no_audio) {
+        const char *dir = getenv("V8_PACK") ? getenv("V8_PACK") : "samples";
+        if ((out_mode == OUT_QUIET ? load_pack(dir) : load_pack_quietly(dir)))
+            return 1;
+        int err;
+        if ((err = snd_pcm_open(&pcm, dev, SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
+            fprintf(stderr, "open %s: %s  (set ALSA_DEV - see aplay -l - or use --no-audio)\n",
+                    dev, snd_strerror(err));
+            return 1;
+        }
+        if ((err = snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE,
+                                      SND_PCM_ACCESS_RW_INTERLEAVED,
+                                      1, SR, 1, 20000)) < 0) {
+            fprintf(stderr, "params: %s\n", snd_strerror(err)); return 1;
+        }
+    }
+
+    if (sim) {
+        if (no_audio) { fprintf(stderr, "--sim needs audio\n"); return 2; }
+        /* bench mode, controller unpowered: the old simulated throttle ramp */
+        if (out_mode != OUT_QUIET)
+            fprintf(stderr, "speaker: --sim, simulated throttle on %s\n", dev);
+        while (!stop) {
+            engine_step(read_pedal(), Ts);
+            render(buf, PERIOD, w * 9.5493f, u_f);
+            for (int i = 0; i < PERIOD; i++) {
+                float s = buf[i] * 1.75f * volume;
+                if (s >  1.0f) s =  1.0f;
+                if (s < -1.0f) s = -1.0f;
+                out[i] = (int16_t)(s * 30000.0f);
+            }
+            snd_pcm_sframes_t n = snd_pcm_writei(pcm, out, PERIOD);
+            if (n < 0) snd_pcm_recover(pcm, (int)n, 1);
+        }
+        snd_pcm_close(pcm);
+        return 0;
+    }
+
+    /* ---- car mode: motor rpm and torque from the PMAC over CAN ---- */
+    if (out_mode != OUT_QUIET)
+        canfeed_set_hook(on_frame);
+    if (canfeed_start(ifn, node)) {
+        fprintf(stderr, "speaker: cannot open %s - is it up? (or try --sim)\n", ifn);
+        return 1;
+    }
+    if (out_mode != OUT_QUIET)
+        fprintf(stderr, "speaker: PMAC node %d on %s, %s - Ctrl-C to stop\n", node, ifn,
+                no_audio ? "no audio" : dev);
+
+    Feed fb;
+    memset(&fb, 0, sizeof fb);
+    float fade = 0.0f;
+
+    while (!stop) {
+        canfeed_update(&fb, Ts);
+        if (no_audio) {
+            usleep((useconds_t)(Ts * 1e6f));
+            continue;
+        }
+        render(buf, PERIOD, fb.rpm, fb.load);
+        g_tone_db = tone_shelf_db_now();
+        g_audio   = 1;
+
+        /* Speed or torque 250 ms stale -> fade to silence (~85 ms, no click). A stuck
+         * engine note after a bus fault would tell the driver the car is
+         * doing something it isn't. Duck during virtual gear shifts. */
+        float target = fb.live ? (fb.shifting ? 0.35f : 1.0f) : 0.0f;
         for (int i = 0; i < PERIOD; i++) {
-            float s = buf[i] * 1.75f;
+            fade += (target - fade) * 0.004f;
+            float s = buf[i] * 1.75f * fade * volume;
             if (s >  1.0f) s =  1.0f;
             if (s < -1.0f) s = -1.0f;
             out[i] = (int16_t)(s * 30000.0f);
@@ -640,7 +915,10 @@ int main(int argc, char **argv)
         snd_pcm_sframes_t n = snd_pcm_writei(pcm, out, PERIOD);
         if (n < 0) snd_pcm_recover(pcm, (int)n, 1);
     }
+
+    if (pcm) snd_pcm_close(pcm);
+    finish(0, &fb);
     return 0;
-#endif
 }
-#endif /* SAMPLER_NO_MAIN */
+#endif  /* OFFLINE */
+#endif  /* SAMPLER_NO_MAIN */

@@ -124,10 +124,40 @@ The whole header. Pad assignment:
 | LPSPI4 | IO18–IO21 | 12, 35, 38, 40 | PCS0, SIN, SOUT, SCK |
 | LPI2C3 | IO00, IO01 | 27, 28 | SDA, SCL |
 | LPI2C4 | IO02, IO03 | 3, 5 | SDA, SCL |
-| GPIO2 | IO16, IO17, IO22, IO23, IO25, IO26, IO27 | 36, 11, 15, 16, 22, 37, 13 | plain GPIO |
+| GPIO2 | IO16, IO17, IO22, IO23, IO26 | 36, 11, 15, 16, 37 | plain GPIO |
+| *CAN2 — Linux, not M33* | *IO25, IO27* | *22, 13* | *onboard transceiver* |
 
 `IO24` (pin 18) is deliberately left untouched. The allocation covers
 `IO00`–`IO27` with no overlap.
+
+**`IO25`/`IO27` are NOT M33 GPIOs** — they carry CAN2, see §5.1. They were in
+the original request but the board makes it impossible: those two pads feed the
+FRDM's onboard CAN transceiver and are the only CAN2 route on this board.
+`IO24`, `IO28` and `IO29` are free if you need substitute GPIOs.
+
+### 5.1 CAN2 stays with Linux
+
+`flexcan2` is left **enabled for Linux**, exactly as the stock board DTS has it:
+
+```dts
+/* no override -- base imx93-11x11-frdm.dts owns it */
+pinctrl-0 = <&pinctrl_flexcan2>;      /* IO25 = CAN2_TX, IO27 = CAN2_RX */
+pinctrl-1 = <&pinctrl_flexcan2_sleep>;
+xceiver-supply = <&reg_can2_stby>;     /* PCAL6524 GPIO 23, active low */
+status = "okay";
+```
+
+This costs `IO25`/`IO27` from the M33 GPIO list, and there is no way around it:
+
+- CAN2's four pad options are `IO25/IO27`, `DAP_TDI/DAP_TDO` (taken by lpuart5 /
+  Bluetooth), `ENET1_TD3/TD2` (Ethernet) and `SD2_DATA0/DATA1` (SD card). Only
+  the first pair is free.
+- `flexcan1` is **never referenced** by `imx93-11x11-frdm.dts` — no transceiver
+  is wired to it on this board. Its pad options (`PDM_*`, `SAI1_TX*`) collide
+  with the audio block anyway. It stays `disabled`.
+
+Expect `can0` in Linux. The transceiver's standby line is handled by the
+regulator, so no manual GPIO poking is needed.
 
 ### Two conflicts, resolved in favour of the request
 
@@ -173,7 +203,6 @@ the M33 therefore does not strand the rails.
 | Lost | Why |
 |---|---|
 | `tpm3`, `tpm4` — RGB LED PWM | Deleted. Channels are on `IO04`/`IO12`/`IO13`, needed by LPUART6 and LPUART8. |
-| `flexcan2` — CAN2 | Disabled. CAN2 TX/RX are `IO25`/`IO27`, wanted as GPIO. |
 | `spidev0` | LPSPI3 is disabled. |
 | AP1302 camera + ISP I/O expander | Both were on LPI2C3, now disabled. The AP1302 capture path is gone. |
 
@@ -315,7 +344,7 @@ check `mount | grep mmcblk` on the board rather than assuming.
 Current copy in this directory:
 
 ```
-imx93-11x11-frdm-m33-hdr.dtb   62673 bytes   md5 8bc8c43315a0d9ad38277ba199b30f20
+imx93-11x11-frdm-m33-hdr.dtb   62621 bytes   md5 ea9825b93f66bf405276c89daf8ba30e
 ```
 
 ## 8. Verification performed

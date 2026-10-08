@@ -24,12 +24,11 @@
 #include "icm_42686_p.h"
 #include "i2c_driver.h"
 #include "bmm350.h"
-#include "bmp581.h"
 #include "mavlink_min.h"
 #include "gps_m10.h"
-
-
-
+#include "ahrs.h"
+#include "mag_cal.h"
+#include "pmac_link.h"
 
 
 /*******************************************************************************
@@ -39,24 +38,21 @@
 #define  imu_task_PRIORITY     (configMAX_PRIORITIES - 2)
 #define  mag_task_PRIORITY     (configMAX_PRIORITIES - 3)
 #define  gps_task_PRIORITY     (configMAX_PRIORITIES - 4)
-#define  baro_task_PRIORITY    (configMAX_PRIORITIES - 5)
 
 /*
- * Periodic data output per task. Init banners and failures are never
- * suppressed - losing those costs diagnosis - only the once-per-sample lines,
- * which exist to prove a sensor works and are noise once it has.
+ * Console output is warnings and failures only. Everything periodic - sensor
+ * data, link statistics - goes over MAVLink instead. A failure that repeats
+ * every sample is printed the first time and then once per this many, so a
+ * dead bus says so without flooding the console.
  */
-#define  GPS_PRINT_FIX         0
-#define  BARO_PRINT_DATA       0
+#define  WARN_REPEAT_EVERY     1000U
 
 /*
- * The two I2C sensors are off until R54/R58 and R55/R57 are fitted. Both buses
- * are proven to work only on the pads' weak internal pull-ups, which gives the
- * barometer about 1 corrupt read in 125 and the magnetometer no usable data at
- * all - see STATUS.md section 4.1. Set this back to 1 once the resistors are
- * populated; nothing else needs to change.
+ * The BMM350 magnetometer on LPI2C4. R54/R58 are now fitted on the sensor
+ * board, so the bus has its real 3.3 V pull-ups and runs at 400 kHz - see
+ * STATUS.md section 4.1.
  */
-#define  I2C_SENSORS_ENABLED   0
+#define  I2C_SENSORS_ENABLED   1
 
 /* ---------------------------------------------------------------------------
  *  IMU -> VTX telemetry stream
@@ -101,7 +97,69 @@
  */
 #define  VTX_STREAM_MAVLINK    1
 
-/* SCALED_IMU every Nth sample. At 200 Hz, 4 gives 50 Hz and ~1.7 kB/s. */
+/*
+ * IMU sensor axes -> vehicle body axes, forward-right-down, which is the frame
+ * nav/ahrs.c and MAVLink ATTITUDE work in. body = k_imu_to_body * sensor.
+ *
+ * The default assumes the board lies flat with the IMU's X axis pointing to
+ * the front of the car: the accelerometer reads +1 g on Z sitting flat, so
+ * sensor Z is up, and a right-handed X-forward, Z-up frame has Y to the left.
+ * Hence (x, -y, -z).
+ *
+ * VERIFY THIS ON THE CAR, once the board is mounted. With the car level,
+ * ATTITUDE must read roll ~0 and pitch ~0; lifting the nose must make pitch
+ * positive; dropping the right side must make roll positive; turning right
+ * must make yaw increase. Any row here can be permuted or negated to fix a
+ * mismatch, but the matrix must stay a rotation - determinant +1. A mirrored
+ * axis (determinant -1) still reads level on the bench and then turns the
+ * wrong way.
+ */
+static const float k_imu_to_body[3][3] = {
+    {1.0f,  0.0f,  0.0f},
+    {0.0f, -1.0f,  0.0f},
+    {0.0f,  0.0f, -1.0f},
+};
+
+/*
+ * BMM350 axes -> body FRD, applied after the calibration in nav/mag_cal.h.
+ *
+ * The magnetometer is a different chip from the IMU and its axes need not
+ * match. What is known: sitting flat it reads about -12000 on Z, and the
+ * field here dips downward, so its Z points up like the IMU's - hence the -1
+ * on Z. Its X and Y are ASSUMED to match the IMU's.
+ *
+ * VERIFY: power up facing a known direction and read ATTITUDE yaw - before
+ * the first GPS course it comes from the magnetometer. Then turn the car 90
+ * degrees right: yaw must rise by 90 and stay there. If X or Y is mirrored the
+ * magnetometer pulls yaw the other way, the filter rejects every sample (it
+ * disagrees with the gyro), and power-up headings come out mirrored. The
+ * determinant must stay +1, as for k_imu_to_body.
+ */
+static const float k_mag_to_body[3][3] = {
+    {1.0f,  0.0f,  0.0f},
+    {0.0f, -1.0f,  0.0f},
+    {0.0f,  0.0f, -1.0f},
+};
+
+static const float k_mag_cal_offset[3]  = MAG_CAL_OFFSET;
+static const float k_mag_cal_w[3][3]    = MAG_CAL_W;
+
+/*
+ * Motor controller values on the VTX link, as NAMED_VALUE_FLOAT, in the order
+ * of pmac_telem_t.v[] (comms/pmac_telem.h). At most 10 characters each.
+ */
+static const char *const k_pmac_names[PMAC_TV_COUNT] = {
+    "MOT_RPM", "MOT_TRQ", "BAT_A", "CAP_V", "MOT_TEMP",
+    "HS_TEMP", "IQ_A",    "ID_A",  "MOD_PCT",
+};
+
+/*
+ * RAW_IMU and ATTITUDE every Nth sample. At 200 Hz, 4 gives 50 Hz of each:
+ * 38 + 40 bytes per pass, ~3.9 kB/s, plus GPS_RAW_INT at 10 Hz, HEARTBEAT
+ * and the magnetometer status - about 38% of the 115200 link. The motor
+ * controller values add one NAMED_VALUE_FLOAT per pass, ~1.4 kB/s, about 12%
+ * more, and only while Linux is sending them.
+ */
 #define  VTX_IMU_DIVISOR       4U
 #define  VTX_HEARTBEAT_MS      1000U
 
@@ -113,12 +171,15 @@
  * every 5 ms, so this is pure insurance against a scheduling hiccup rather
  * than a working buffer. Overruns are counted, never silently dropped.
  */
-#define  VTX_TX_SLOTS          16U /* one task iteration can now queue
-                                     * HEARTBEAT + SCALED_IMU + GPS_RAW_INT */
+#define  VTX_TX_SLOTS          16U /* the busiest pass queues 11: HEARTBEAT,
+                                     * 6 x NAMED_VALUE_FLOAT, RAW_IMU,
+                                     * ATTITUDE, GPS_RAW_INT */
+/* Motor controller telemetry older than this is not sent: the Linux daemon
+ * sends at 10 Hz, so a second of silence means it or the link is down. */
+#define  PMAC_STALE_MS       1000U
 /* Big enough for the longest frame either format produces: GPS_RAW_INT is 42
  * bytes on the wire against the raw frame's 24. */
 #define  VTX_SLOT_BYTES        48U
-#define  VTX_REPORT_MS         1000U
 #define  GPS_RX_CHUNK_BYTES    64U  /* eDMA receive granularity */
 #define  GPS_POLL_MS            5U  /* worst-case added latency for the tail of a
                                      * burst, since the task consumes partial
@@ -134,6 +195,7 @@
  * notification rather than polling so it drains promptly.
  */
 #define  GPS_RX_BUFFERS         8U
+#define  GPS_STALL_WARN_EVERY_S 30U /* repeat of the "no messages" warning */
 #define  GPS_BAUD_TRY_MS     1500U  /* > 1 navigation epoch, so a silent second
                                      * is not mistaken for a wrong baud rate */
 
@@ -143,7 +205,6 @@
 uart_ctrl_t vtx_uart;
 spi_ctrl_t  imu_spi;
 i2c_ctrl_t  mag_i2c;
-i2c_ctrl_t  baro_i2c;
 uart_ctrl_t gps_uart;
 
 /*
@@ -214,9 +275,26 @@ typedef struct {
     uint16_t eph;       /*!< DOP x100, MAVLINK_U16_UNKNOWN if none */
     uint16_t vel_cm_s;
     uint16_t cog_cdeg;  /*!< MAVLINK_U16_UNKNOWN when too slow to mean anything */
+
+    /* Unclipped, for the attitude filter, which applies its own gating. */
+    uint32_t speed_mm_s;
+    uint32_t course_1e3;   /*!< degrees x 1000, >= 360000 when unknown */
+    uint32_t head_acc_1e5; /*!< degrees x 1e5; UINT32_MAX when not reported (NMEA) */
 } gps_snapshot_t;
 
 static gps_snapshot_t s_gps_snap;
+
+/*
+ * The latest magnetometer sample, published by mag_task for imu_task to put in
+ * RAW_IMU - the same single-producer hand-off as s_gps_snap. Raw counts; the
+ * magnetometer is not used for attitude, see nav/ahrs.h.
+ */
+typedef struct {
+    uint32_t updates; /*!< 0 = no sample yet */
+    int32_t  raw[3];
+} mag_snapshot_t;
+
+static mag_snapshot_t s_mag_snap;
 
 /*******************************************************************************
  * Prototypes
@@ -226,9 +304,6 @@ static void imu_task(void *pvParameters);
 static void mag_task(void *pvParameters);
 #endif
 static void gps_task(void *pvParameters);
-#if I2C_SENSORS_ENABLED
-static void baro_task(void *pvParameters);
-#endif
 static void gps_uart_callback(LPUART_Type *base, lpuart_edma_handle_t *handle, status_t status, void *userData);
 static void vtx_uart_callback(LPUART_Type *base, lpuart_edma_handle_t *handle, status_t status, void *userData);
 
@@ -423,19 +498,20 @@ static void vtx_queue_frame(const uint8_t *frame, uint16_t len)
     vtx_tx_kick();
 }
 
-/*! @brief Queue one IMU sample in whichever format is selected. */
-static void vtx_queue_imu_sample(const icm42686_data_t *s)
+/*! @brief Queue one IMU sample in whichever format is selected. mag may be
+ *         NULL; the raw frame format has no field for it. */
+static void vtx_queue_imu_sample(const icm42686_data_t *s, const int32_t *mag)
 {
     uint8_t  frame[VTX_SLOT_BYTES];
     uint16_t len;
 
 #if VTX_STREAM_MAVLINK
-    len = mavlink_scaled_imu(frame, sizeof(frame), &s_mav,
-                             (uint32_t)(micros64() / 1000ULL),
-                             s->accel_mg, s->gyro_mdps, NULL);
+    len = mavlink_raw_imu(frame, sizeof(frame), &s_mav, micros64(),
+                          s->accel_raw, s->gyro_raw, mag);
 #else
     static uint16_t seq;
 
+    (void)mag;
     vtx_build_imu_frame(frame, seq++, micros(), s);
     len = VTX_IMU_FRAME_BYTES;
 #endif
@@ -495,36 +571,91 @@ int main(void)
             ;
     }
 
-#if I2C_SENSORS_ENABLED
-    /* +300: bmp581_altitude_cm() calls powf, and PRINTF is the usual tenant. */
-    if (xTaskCreate(baro_task, "baro_task", configMINIMAL_STACK_SIZE + 300, NULL, baro_task_PRIORITY, NULL) !=
-        pdPASS)
+    if (!pmac_link_start())
     {
-        PRINTF("BARO task creation failed!.\r\n");
-        while (1)
-            ;
+        PRINTF("RPMSG task creation failed!.\r\n");
     }
-#endif
+
     vTaskStartScheduler();
     for (;;)
         ;
 }
 
 /*!
- * @brief Brings up the ICM-42686-P and prints a sample every IMU_SAMPLE_RATE_MS.
+ * @brief Map one sensor-frame vector into body FRD - see k_imu_to_body.
+ */
+static void imu_to_body(const float in[3], float out[3])
+{
+    for (uint32_t r = 0U; r < 3U; r++)
+    {
+        out[r] = k_imu_to_body[r][0] * in[0] + k_imu_to_body[r][1] * in[1] +
+                 k_imu_to_body[r][2] * in[2];
+    }
+}
+
+/*!
+ * @brief Calibrate one raw magnetometer sample and map it into body FRD.
+ */
+static void mag_to_body(const int32_t raw[3], float out[3])
+{
+    float centred[3];
+    float cal[3];
+
+    for (uint32_t i = 0U; i < 3U; i++)
+    {
+        centred[i] = (float)raw[i] - k_mag_cal_offset[i];
+    }
+    for (uint32_t r = 0U; r < 3U; r++)
+    {
+        cal[r] = k_mag_cal_w[r][0] * centred[0] + k_mag_cal_w[r][1] * centred[1] +
+                 k_mag_cal_w[r][2] * centred[2];
+    }
+    for (uint32_t r = 0U; r < 3U; r++)
+    {
+        out[r] = k_mag_to_body[r][0] * cal[0] + k_mag_to_body[r][1] * cal[1] +
+                 k_mag_to_body[r][2] * cal[2];
+    }
+}
+
+/*!
+ * @brief Feed one new GPS solution to the attitude filter.
  *
- * Runs the LPSPI in polled mode rather than eDMA: a 15-byte transaction at
- * 2 MHz is about 60 us every 100 ms, so DMA buys nothing here, and it keeps the
- * sample path clear of the TCM-aliasing question that the eDMA path still has
- * open. Flip enable_dma to true once that is settled.
+ * Only a 3-D fix counts. The heading accuracy comes from NAV-PVT; NMEA has
+ * none, so it is passed as unknown-but-acceptable and the filter falls back on
+ * its speed and turn-rate gates alone.
+ */
+static void ahrs_feed_gps(ahrs_t *ahrs, const gps_snapshot_t *snap)
+{
+    const float deg2rad = 3.14159265f / 180.0f;
+    bool  fix_ok  = (snap->fix_type >= GPS_FIX_TYPE_3D_FIX);
+    float course  = (snap->course_1e3 < 360000U) ? (float)snap->course_1e3 * (deg2rad / 1000.0f)
+                                                 : -1.0f;
+    float acc     = (snap->head_acc_1e5 != UINT32_MAX)
+                        ? (float)snap->head_acc_1e5 * (deg2rad / 100000.0f)
+                        : 0.0f;
+
+    ahrs_update_course(ahrs, fix_ok, (float)snap->speed_mm_s / 1000.0f, course, acc);
+}
+
+/*!
+ * @brief The IMU, the attitude filter, and everything on the VTX link.
  *
- * pcs_continuous must be on either way - the burst read is one CS assertion.
+ * Every 5 ms: read the ICM-42686-P, run the attitude filter, and hand it any
+ * new GPS solution. Every VTX_IMU_DIVISOR-th pass: RAW_IMU (accelerometer,
+ * gyro and the latest magnetometer sample, all raw counts) and ATTITUDE. Also
+ * HEARTBEAT at 1 Hz and GPS_RAW_INT per GPS solution.
+ *
+ * This task is the only writer of the VTX queue and of the MAVLink sequence
+ * counter, which is why the GPS and magnetometer data come to it through
+ * snapshots instead of being sent by their own tasks.
  */
 static void imu_task(void *pvParameters)
 {
     icm42686_t      imu;
     icm42686_data_t sample;
     status_t        status;
+    /* Static: the filter state is small, but this task's stack is not. */
+    static ahrs_t   ahrs;
 
     (void)pvParameters;
 
@@ -547,8 +678,6 @@ static void imu_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    PRINTF("IMU: LPSPI4 %s\r\n", imu_spi.enable_dma ? "eDMA (DMA4 ch2/ch3)" : "polled");
-
     icm42686_get_default_config(&imu, &imu_spi);
     /*
      * 200 Hz rather than the driver's 100 Hz default: one FreeRTOS tick is
@@ -569,63 +698,165 @@ static void imu_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    PRINTF("IMU: ICM-42686-P ready, %u Hz sampled -> VTX LPUART6 as %s at %u Hz (%s clock)\r\n",
-           (unsigned int)(1000U / IMU_SAMPLE_RATE_MS),
-           VTX_STREAM_MAVLINK ? "MAVLink SCALED_IMU" : "raw frames",
-           (unsigned int)(1000U / IMU_SAMPLE_RATE_MS / VTX_IMU_DIVISOR),
-           s_dwt_ok ? "DWT" : "tick");
+    if (!s_dwt_ok)
+    {
+        /* Every timestamp and the filter's dt then come from the 5 ms tick. */
+        PRINTF("IMU: WARNING DWT cycle counter not running, timing falls back to the tick\r\n");
+    }
 
-    uint32_t   reads = 0U;
-    uint32_t   fails = 0U;
-    TickType_t next_report = xTaskGetTickCount() + pdMS_TO_TICKS(VTX_REPORT_MS);
+    ahrs_init(&ahrs);
+
+    uint32_t   reads    = 0U;
+    uint32_t   fails    = 0U;
+    uint64_t   t_prev   = micros64();
+    uint32_t   gps_seen = 0U; /* s_gps_snap.updates last given to the filter */
+    uint32_t   mag_seen = 0U; /* s_mag_snap.updates likewise */
+    uint32_t   pmac_next = 0U; /* round robin over k_pmac_names */
 #if VTX_STREAM_MAVLINK
-    TickType_t next_beat   = xTaskGetTickCount();
-    uint32_t   gps_sent    = 0U; /* s_gps_snap.updates last transmitted */
+    TickType_t next_beat = xTaskGetTickCount();
 #endif
-    uint32_t   last_sent = 0U;
-    uint32_t   last_bytes = 0U;
 
     while (1)
     {
+        uint64_t       now;
+        float          dt;
+        gps_snapshot_t gps;
+        mag_snapshot_t mag;
+
         status = icm42686_read_data(&imu, &sample);
         reads++;
 
+        now    = micros64();
+        dt     = (float)(uint32_t)(now - t_prev) * 1e-6f; /* 32 bits: 71 min */
+        t_prev = now;
+
         if (status == kStatus_Success)
         {
-            /* Every sample is read, but only every Nth is transmitted: a GCS
-             * has no use for 200 Hz and the link does. */
-            if ((reads % VTX_IMU_DIVISOR) == 0U)
-            {
-                vtx_queue_imu_sample(&sample);
-            }
+            float gyro_s[3];
+            float gyro_b[3];
+            float acc_b[3];
 
-            /* Milli-units as integers: PRINTF_FLOAT_ENABLE is off in this
-             * build, so %f would print garbage. */
-            // PRINTF("IMU a[mg] %6d %6d %6d  g[mdps] %7d %7d %7d  t[mC] %6d\r\n",
-            //        (int)sample.accel_mg[0], (int)sample.accel_mg[1], (int)sample.accel_mg[2],
-            //        (int)sample.gyro_mdps[0], (int)sample.gyro_mdps[1], (int)sample.gyro_mdps[2],
-            //        (int)sample.temp_mc);
+            for (uint32_t i = 0U; i < 3U; i++)
+            {
+                gyro_s[i] = sample.gyro_dps[i] * (3.14159265f / 180.0f);
+            }
+            imu_to_body(gyro_s, gyro_b);
+            imu_to_body(sample.accel_g, acc_b);
+
+            /* A stall longer than this is not a sample period, and integrating
+             * it as one would be a step in the attitude. */
+            if ((dt > 0.0f) && (dt < 0.05f))
+            {
+                ahrs_update(&ahrs, gyro_b, acc_b, dt);
+            }
         }
         else
         {
             /*
-             * Worth distinguishing while the DMA path is on trial:
-             * kStatus_Timeout (4) means the transfer was accepted but the
-             * completion callback never fired - the eDMA did not finish.
-             * kStatus_LPSPI_Busy means a previous transfer never cleared.
+             * kStatus_Timeout means the transfer was accepted but the eDMA
+             * completion never came; kStatus_LPSPI_Busy means a previous
+             * transfer never cleared.
              */
             fails++;
-            PRINTF("IMU: read failed, status=%d (%u of %u reads)\r\n",
-                   (int)status, (unsigned int)fails, (unsigned int)reads);
+            if ((fails == 1U) || ((fails % WARN_REPEAT_EVERY) == 0U))
+            {
+                PRINTF("IMU: read failed, status=%d (%u of %u reads)\r\n",
+                       (int)status, (unsigned int)fails, (unsigned int)reads);
+            }
+        }
+
+        taskENTER_CRITICAL();
+        gps = s_gps_snap;
+        mag = s_mag_snap;
+        taskEXIT_CRITICAL();
+
+        /* Each new magnetometer sample goes to the filter once - 25 Hz. */
+        if ((mag.updates != 0U) && (mag.updates != mag_seen))
+        {
+            float m_b[3];
+
+            mag_seen = mag.updates;
+            mag_to_body(mag.raw, m_b);
+            ahrs_update_mag(&ahrs, m_b);
+        }
+
+        /* Each new GPS solution goes to the filter once - 10 Hz configured. */
+        if ((gps.updates != 0U) && (gps.updates != gps_seen))
+        {
+            gps_seen = gps.updates;
+            ahrs_feed_gps(&ahrs, &gps);
+
+#if VTX_STREAM_MAVLINK
+            {
+                uint8_t  frame[VTX_SLOT_BYTES];
+                uint16_t len;
+
+                len = mavlink_gps_raw_int(frame, sizeof(frame), &s_mav, now,
+                                          gps.fix_type, gps.sats,
+                                          gps.lat_1e7, gps.lon_1e7, gps.alt_mm,
+                                          gps.eph, (uint16_t)MAVLINK_U16_UNKNOWN,
+                                          gps.vel_cm_s, gps.cog_cdeg);
+                vtx_queue_frame(frame, len);
+            }
+#endif
+        }
+
+        /* Every sample feeds the filter, but only every Nth is transmitted:
+         * a GCS has no use for 200 Hz and the link does. */
+        if ((status == kStatus_Success) && ((reads % VTX_IMU_DIVISOR) == 0U))
+        {
+            vtx_queue_imu_sample(&sample, (mag.updates != 0U) ? mag.raw : NULL);
+
+#if VTX_STREAM_MAVLINK
+            {
+                uint8_t  frame[VTX_SLOT_BYTES];
+                uint16_t len;
+                float    roll, pitch, yaw;
+
+                ahrs_euler(&ahrs, &roll, &pitch, &yaw);
+                len = mavlink_attitude(frame, sizeof(frame), &s_mav,
+                                       (uint32_t)(now / 1000ULL), roll, pitch, yaw,
+                                       ahrs.rate[0], ahrs.rate[1], ahrs.rate[2]);
+                vtx_queue_frame(frame, len);
+            }
+
+            /*
+             * One motor controller value per pass, round robin over the ones
+             * Linux marked valid: nine values at 50 Hz is about 5.5 Hz each,
+             * spread evenly instead of a burst of nine.
+             */
+            {
+                pmac_telem_t pm;
+
+                if (pmac_link_latest(&pm) < PMAC_STALE_MS)
+                {
+                    for (uint32_t k = 0U; k < PMAC_TV_COUNT; k++)
+                    {
+                        uint32_t i = (pmac_next + k) % PMAC_TV_COUNT;
+
+                        if ((pm.valid & (1UL << i)) != 0U)
+                        {
+                            uint8_t  frame[VTX_SLOT_BYTES];
+                            uint16_t len;
+
+                            len = mavlink_named_value_float(frame, sizeof(frame), &s_mav,
+                                                            (uint32_t)(now / 1000ULL),
+                                                            k_pmac_names[i], pm.v[i]);
+                            vtx_queue_frame(frame, len);
+                            pmac_next = i + 1U;
+                            break;
+                        }
+                    }
+                }
+            }
+#endif
         }
 
 #if VTX_STREAM_MAVLINK
         /*
          * HEARTBEAT at 1 Hz. Without it a ground station will not show a
          * vehicle at all, however much sensor data arrives - it is the message
-         * that says "something is here". Sent from this task so there is a
-         * single producer for the transmit queue and the MAVLink sequence
-         * counter needs no lock.
+         * that says "something is here".
          */
         if ((int32_t)(xTaskGetTickCount() - next_beat) >= 0)
         {
@@ -636,58 +867,57 @@ static void imu_task(void *pvParameters)
             len = mavlink_heartbeat(beat, sizeof(beat), &s_mav,
                                     MAV_TYPE_GENERIC, MAV_STATE_ACTIVE);
             vtx_queue_frame(beat, len);
-        }
 
-        /*
-         * GPS_RAW_INT whenever gps_task has published a new solution - 10 Hz
-         * with the receiver configured, 1 Hz on factory NMEA. Sent from here,
-         * not from gps_task, to keep a single producer; see s_gps_snap.
-         */
-        {
-            gps_snapshot_t snap;
-
-            taskENTER_CRITICAL();
-            snap = s_gps_snap;
-            taskEXIT_CRITICAL();
-
-            if ((snap.updates != 0U) && (snap.updates != gps_sent))
+            /*
+             * Magnetometer status, once a second, because ATTITUDE has no
+             * field for it: MAG_STATE 0 = not yet checked against the GPS,
+             * 1 = trusted, 2 = dropped for disagreeing with the GPS. MAG_ERR
+             * is the magnetometer minus the GPS course at the last check, and
+             * MAG_OFS the learned offset, both degrees.
+             */
             {
-                uint8_t  frame[VTX_SLOT_BYTES];
-                uint16_t len;
+                const float rad2deg = 180.0f / 3.14159265f;
+                uint32_t    t_ms    = (uint32_t)(now / 1000ULL);
 
-                gps_sent = snap.updates;
-                len = mavlink_gps_raw_int(frame, sizeof(frame), &s_mav, micros64(),
-                                          snap.fix_type, snap.sats,
-                                          snap.lat_1e7, snap.lon_1e7, snap.alt_mm,
-                                          snap.eph, (uint16_t)MAVLINK_U16_UNKNOWN,
-                                          snap.vel_cm_s, snap.cog_cdeg);
-                vtx_queue_frame(frame, len);
+                len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "MAG_STATE",
+                                                (float)ahrs.mag_state);
+                vtx_queue_frame(beat, len);
+                len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "MAG_ERR",
+                                                ahrs.mag_gps_err * rad2deg);
+                vtx_queue_frame(beat, len);
+                len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "MAG_OFS",
+                                                ahrs.mag_offset * rad2deg);
+                vtx_queue_frame(beat, len);
+            }
+
+            /*
+             * Motor controller link status, once a second. PMAC_LINK 0 = no
+             * message from Linux for PMAC_STALE_MS (daemon not running, or
+             * RPMsg down), 1 = Linux is sending but has no fresh CAN data
+             * (bus down, controller off), 2 = live. PMAC_NMT is the
+             * controller's CANopen state (5 Operational, 127 Pre-op, 4
+             * Stopped, 255 none seen); PMAC_FLT the Sevcon fault id, 0 = none.
+             */
+            {
+                pmac_telem_t pm;
+                uint32_t     t_ms  = (uint32_t)(now / 1000ULL);
+                bool         fresh = (pmac_link_latest(&pm) < PMAC_STALE_MS);
+                float        link  = !fresh ? 0.0f : ((pm.valid != 0U) ? 2.0f : 1.0f);
+
+                len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "PMAC_LINK", link);
+                vtx_queue_frame(beat, len);
+                if (fresh)
+                {
+                    len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "PMAC_NMT",
+                                                    (float)pm.nmt);
+                    vtx_queue_frame(beat, len);
+                    len = mavlink_named_value_float(beat, sizeof(beat), &s_mav, t_ms, "PMAC_FLT",
+                                                    (float)pm.fault_id);
+                    vtx_queue_frame(beat, len);
+                }
             }
         }
 #endif
-
-        if ((int32_t)(xTaskGetTickCount() - next_report) >= 0)
-        {
-            uint32_t sent  = s_vtx_frames_sent;
-            uint32_t bytes = s_vtx_bytes_sent;
-            uint32_t fps   = sent - last_sent;
-            uint32_t bps   = bytes - last_bytes;
-            /* Line capacity in bytes/s: 10 bits on the wire per byte with one
-             * start and one stop bit, so 115200 baud carries 11520 B/s. */
-            uint32_t capacity = vtx_uart.baudrate / 10U;
-
-            next_report += pdMS_TO_TICKS(VTX_REPORT_MS);
-            last_sent  = sent;
-            last_bytes = bytes;
-
-            PRINTF("VTX %u fps  %u B/s  %u%% of %u baud  [sent=%u drop=%u err=%u reads=%u fail=%u]\r\n",
-                   (unsigned int)fps, (unsigned int)bps,
-                   (unsigned int)((bps * 100U) / capacity),
-                   (unsigned int)vtx_uart.baudrate,
-                   (unsigned int)sent, (unsigned int)s_vtx_frames_dropped,
-                   (unsigned int)s_vtx_tx_errors,
-                   (unsigned int)reads, (unsigned int)fails);
-        }
 
         vTaskDelay(pdMS_TO_TICKS(IMU_SAMPLE_RATE_MS));
     }
@@ -695,8 +925,8 @@ static void imu_task(void *pvParameters)
 
 #if I2C_SENSORS_ENABLED
 /*!
- * @brief Brings up the BMM350 magnetometer and prints a sample every
- *        BMM350_SAMPLE_RATE_MS.
+ * @brief Brings up the BMM350 magnetometer and publishes a sample every
+ *        BMM350_SAMPLE_RATE_MS for imu_task to send in RAW_IMU.
  *
  * Uses the LPI2C4 defaults from i2c_driver.h. Values are RAW 24-bit counts:
  * converting to microtesla needs Bosch's OTP compensation, which this driver
@@ -724,10 +954,6 @@ static void mag_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    PRINTF("MAG: LPI2C4 %s @ %u Hz\r\n",
-           mag_i2c.enable_dma ? "eDMA (DMA4 ch4/ch5)" : "polled",
-           (unsigned int)mag_i2c.baudrate_bps);
-
     bmm350_get_default_config(&mag, &mag_i2c);
 
     status = bmm350_init(&mag);
@@ -753,7 +979,22 @@ static void mag_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    PRINTF("MAG: BMM350 ready\r\n");
+    {
+        /* The part must have reached normal mode, or the data registers hold a
+         * constant pattern (0x7F7F7F) rather than measurements. */
+        uint8_t pmu = 0U;
+
+        status = bmm350_pmu_status(&mag, &pmu);
+        if ((status != kStatus_Success) || ((pmu & BMM350_PMU_STATUS_NORMAL) == 0U) ||
+            ((pmu & BMM350_PMU_STATUS_ILLEGAL) != 0U))
+        {
+            PRINTF("MAG: WARNING not in normal mode, PMU_STATUS_0=0x%02X (%s, last cmd %u)%s\r\n",
+                   pmu,
+                   (pmu & BMM350_PMU_STATUS_ILLEGAL) ? "ILLEGAL cmd" : "no illegal cmd",
+                   (unsigned int)(pmu >> BMM350_PMU_STATUS_CMD_SHIFT),
+                   (status != kStatus_Success) ? "  [status read failed]" : "");
+        }
+    }
 
     while (1)
     {
@@ -762,153 +1003,24 @@ static void mag_task(void *pvParameters)
 
         if (status == kStatus_Success)
         {
-            PRINTF("MAG raw x %8d  y %8d  z %8d   t %8d\r\n",
-                   (int)sample.mag_raw[0], (int)sample.mag_raw[1], (int)sample.mag_raw[2],
-                   (int)sample.temp_raw);
+            taskENTER_CRITICAL();
+            s_mag_snap.updates++;
+            s_mag_snap.raw[0] = sample.mag_raw[0];
+            s_mag_snap.raw[1] = sample.mag_raw[1];
+            s_mag_snap.raw[2] = sample.mag_raw[2];
+            taskEXIT_CRITICAL();
         }
         else
         {
             fails++;
-            PRINTF("MAG: read failed, status=%d (%u of %u reads)\r\n",
-                   (int)status, (unsigned int)fails, (unsigned int)reads);
+            if ((fails == 1U) || ((fails % WARN_REPEAT_EVERY) == 0U))
+            {
+                PRINTF("MAG: read failed, status=%d (%u of %u reads)\r\n",
+                       (int)status, (unsigned int)fails, (unsigned int)reads);
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(BMM350_SAMPLE_RATE_MS));
-    }
-}
-#endif /* I2C_SENSORS_ENABLED */
-
-
-#if I2C_SENSORS_ENABLED
-/*!
- * @brief Reads the BMP581 barometer on LPI2C3 and prints pressure and altitude.
- *
- * Expect this to fail until R55 and R57 are populated - see the barometer
- * section of i2c_driver.h. A failure here looks exactly like the magnetometer's
- * on the other bus, and for the same reason, so the diagnostics are the same:
- * 900 (kStatus_LPI2C_Busy) means the lines are being held low and the bus never
- * even starts, 902 (kStatus_LPI2C_Nak) means it is clocking and nothing is
- * answering.
- *
- * On failure it scans the bus, which is more informative here than on LPI2C4:
- * the GPS DDC sits on this same pair, so a healthy bus with a default-
- * configured u-blox attached should ACK at 0x42 whether or not the barometer
- * answers at 0x46. Finding 0x42 but not 0x46 would point at the sensor board;
- * finding neither points at the pull-ups.
- */
-static void baro_task(void *pvParameters)
-{
-    bmp581_t      baro;
-    bmp581_data_t sample;
-    status_t      status;
-    uint32_t      reads = 0U;
-    uint32_t      fails = 0U;
-    /* Captured on the first good reading. Absolute altitude is only as good as
-     * the sea-level reference, but the change from here is trustworthy. */
-    uint32_t ref_pa    = 0U;
-    bool     have_ref  = false;
-
-    (void)pvParameters;
-
-    i2c_get_default_baro_config(&baro_i2c);
-
-    status = i2c_init(&baro_i2c);
-    if (status != kStatus_Success)
-    {
-        PRINTF("BARO: i2c_init failed (%d)\r\n", (int)status);
-        vTaskDelete(NULL);
-    }
-
-    PRINTF("BARO: LPI2C3 %s @ %u Hz\r\n",
-           baro_i2c.enable_dma ? "eDMA (DMA4 ch8/ch9)" : "polled",
-           (unsigned int)baro_i2c.baudrate_bps);
-
-    bmp581_get_default_config(&baro, &baro_i2c);
-
-    status = bmp581_init(&baro);
-    if (status != kStatus_Success)
-    {
-        uint8_t id = 0U;
-
-        (void)bmp581_chip_id(&baro, &id);
-        PRINTF("BARO: init failed (%d), CHIP_ID=0x%02X expected 0x%02X/0x%02X at addr 0x%02X\r\n",
-               (int)status, id, BMP581_CHIP_ID_VAL, BMP581_CHIP_ID_VAL_ALT, baro.addr7);
-
-        PRINTF("BARO: scanning bus...\r\n");
-        for (uint8_t a = 0x08U; a < 0x78U; a++)
-        {
-            if (i2c_probe(&baro_i2c, a) == kStatus_Success)
-            {
-                PRINTF("BARO:   ACK at 0x%02X%s\r\n", a,
-                       (a == 0x42U) ? "  (u-blox GPS DDC)" : "");
-            }
-        }
-        PRINTF("BARO: scan done\r\n");
-        vTaskDelete(NULL);
-    }
-
-    PRINTF("BARO: BMP581 ready, osr_p=%ux osr_t=%ux effective, odr %s\r\n",
-           (unsigned int)(1U << baro.osr_p_eff), (unsigned int)(1U << baro.osr_t_eff),
-           baro.odr_valid ? "valid" : "TOO FAST for this oversampling");
-
-    while (1)
-    {
-        status = bmp581_read_data(&baro, &sample);
-        reads++;
-
-        if (status == kStatus_Success)
-        {
-            int32_t alt_cm = bmp581_altitude_cm(sample.press_pa, BMP581_SEA_LEVEL_PA);
-
-            if (!have_ref)
-            {
-                ref_pa   = sample.press_pa;
-                have_ref = true;
-            }
-
-#if BARO_PRINT_DATA
-            PRINTF("BARO %u.%02u Pa  %d.%03u C  alt %d.%02u m",
-                   (unsigned int)(sample.press_c_pa / 100U),
-                   (unsigned int)(sample.press_c_pa % 100U),
-                   (int)(sample.temp_m_c / 1000),
-                   (unsigned int)((sample.temp_m_c < 0 ? -sample.temp_m_c : sample.temp_m_c) % 1000),
-                   (int)(alt_cm / 100),
-                   (unsigned int)((alt_cm < 0 ? -alt_cm : alt_cm) % 100));
-
-            {
-                /* Relative to the first reading - the number a barometer is
-                 * actually good for. */
-                int32_t d_cm = bmp581_altitude_cm(sample.press_pa, BMP581_SEA_LEVEL_PA) -
-                               bmp581_altitude_cm(ref_pa, BMP581_SEA_LEVEL_PA);
-
-                PRINTF("  (%c%d.%02u m from start)\r\n",
-                       (d_cm < 0) ? '-' : '+',
-                       (int)((d_cm < 0 ? -d_cm : d_cm) / 100),
-                       (unsigned int)((d_cm < 0 ? -d_cm : d_cm) % 100));
-            }
-#else
-            /* Still tracked, so turning BARO_PRINT_DATA back on needs no other
-             * change - and so the reference is taken from the first good
-             * reading rather than whenever printing happens to be enabled. */
-            (void)alt_cm;
-            (void)ref_pa;
-#endif
-        }
-        else
-        {
-            fails++;
-            /* kStatus_Fail here is the driver's range check rejecting a
-             * corrupted transfer, which on this bus is a different and much
-             * more common story than a NAK - say which. */
-            PRINTF("BARO: read failed, status=%d%s (%u of %u reads) raw p=0x%06X t=0x%06X\r\n",
-                   (int)status,
-                   (status == kStatus_Fail) ? " (out of range: corrupt transfer)" : "",
-                   (unsigned int)fails, (unsigned int)reads,
-                   (unsigned int)sample.press_raw,
-                   (unsigned int)((uint32_t)sample.temp_raw & 0xFFFFFFU));
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(BMP581_SAMPLE_RATE_MS));
     }
 }
 #endif /* I2C_SENSORS_ENABLED */
@@ -1089,10 +1201,6 @@ static bool gps_configure(gps_m10_t *gps)
         return false;
     }
 
-    PRINTF("GPS: configuring for %u ms nav period (%u Hz), NAV-PVT only, %s\r\n",
-           (unsigned int)GPS_NAV_PERIOD_MS, (unsigned int)(1000U / GPS_NAV_PERIOD_MS),
-           (GPS_SINGLE_GNSS_25HZ != 0) ? "GPS/SBAS/QZSS only" : "multi-GNSS");
-
     for (uint32_t i = 0U; i < n; i++)
     {
         status_t status;
@@ -1136,16 +1244,11 @@ static bool gps_configure(gps_m10_t *gps)
         }
         else
         {
-            PRINTF("GPS:   %-9s ACK (%u bytes)\r\n", s_steps[i].name,
-                   (unsigned int)s_steps[i].len);
-
             if (s_steps[i].settle_ms != 0U)
             {
                 /* The constellation change restarts the GNSS subsystem. Keep
                  * draining while it re-acquires so the parser stays in sync
                  * with whatever the receiver emits across the restart. */
-                PRINTF("GPS:   %-9s settling %u ms\r\n", s_steps[i].name,
-                       (unsigned int)s_steps[i].settle_ms);
                 for (uint32_t waited = 0U; waited < s_steps[i].settle_ms; waited += GPS_POLL_MS)
                 {
                     gps_drain(gps);
@@ -1250,6 +1353,10 @@ static void gps_publish(const gps_m10_t *gps)
         snap.cog_cdeg = (uint16_t)(d->course_1e3 / 10U);
     }
 
+    snap.speed_mm_s   = d->speed_mm_s;
+    snap.course_1e3   = d->course_1e3;
+    snap.head_acc_1e5 = d->from_ubx ? gps->ubx.pvt.head_acc_1e5 : UINT32_MAX;
+
     taskENTER_CRITICAL();
     s_gps_snap = snap;
     taskEXIT_CRITICAL();
@@ -1289,7 +1396,7 @@ static void gps_task(void *pvParameters)
     status_t   status;
     TickType_t next_report;
     uint32_t   last_updates = 0U;
-    uint32_t   last_pvt     = 0U;
+    uint32_t   stalled_s    = 0U; /* consecutive one-second checks with nothing decoded */
 
     (void)pvParameters;
 
@@ -1305,9 +1412,6 @@ static void gps_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    PRINTF("GPS: LPUART3 %s, probing baud rates\r\n",
-           gps_uart.enable_dma ? "eDMA (DMA4 ch6/ch7)" : "polled");
-
     /*
      * Sweep the plausible line rates until sentences decode. The receiver's
      * configured rate is the one thing we cannot read off the wire - an
@@ -1319,8 +1423,6 @@ static void gps_task(void *pvParameters)
 
     for (uint32_t attempt = 0U; (attempt < ARRAY_SIZE(k_bauds)) && !locked; attempt++)
     {
-        bool dumped = false;
-
         status = uart_set_baudrate(&gps_uart, k_bauds[attempt]);
         if (status != kStatus_Success)
         {
@@ -1345,18 +1447,6 @@ static void gps_task(void *pvParameters)
         {
             if (s_gps_tail != s_gps_head)
             {
-                if (!dumped)
-                {
-                    dumped = true;
-                    PRINTF("GPS: %6u baud, first chunk: \"", (unsigned int)k_bauds[attempt]);
-                    for (uint32_t i = 0U; i < GPS_RX_CHUNK_BYTES; i++)
-                    {
-                        uint8_t c = s_gps_rx[s_gps_tail][i];
-                        PRINTF("%c", ((c >= 0x20U) && (c < 0x7FU)) ? (char)c : '.');
-                    }
-                    PRINTF("\"\r\n");
-                }
-
                 gps_drain(&gps);
 
                 /* Two good messages, not one, so a lucky checksum on garbage
@@ -1370,14 +1460,6 @@ static void gps_task(void *pvParameters)
             }
             vTaskDelay(pdMS_TO_TICKS(GPS_POLL_MS));
         }
-
-        PRINTF("GPS: %6u baud -> %u nmea, %u ubx, %u bytes, %u csum_err%s\r\n",
-               (unsigned int)k_bauds[attempt],
-               (unsigned int)gps.data.sentences_ok,
-               (unsigned int)gps.data.ubx_frames_ok,
-               (unsigned int)gps.data.bytes_seen,
-               (unsigned int)(gps.data.checksum_errors + gps.data.ubx_csum_errors),
-               locked ? "   <-- locked" : "");
     }
 
     if (!locked)
@@ -1400,8 +1482,8 @@ static void gps_task(void *pvParameters)
 
     while (1)
     {
-        /* Woken by the ISR on every chunk; the timeout only keeps the periodic
-         * report running when the receiver goes quiet. */
+        /* Woken by the ISR on every chunk; the timeout only keeps the stall
+         * check running when the receiver goes quiet. */
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(GPS_POLL_MS));
 
         gps_drain(&gps);
@@ -1416,9 +1498,15 @@ static void gps_task(void *pvParameters)
              * fire just because NMEA has been switched off. */
             uint32_t updates = d->sentences_ok + d->pvt_count;
 
-            if (updates == last_updates)
+            if (updates != last_updates)
             {
-                /* Nothing decoded since the last report. bytes_seen separates
+                stalled_s = 0U;
+            }
+            else if (((stalled_s++) % GPS_STALL_WARN_EVERY_S) == 0U)
+            {
+                /* Nothing decoded for a second - said once when it starts and
+                 * then every GPS_STALL_WARN_EVERY_S while it lasts, so an
+                 * unplugged receiver does not fill the console. bytes_seen separates
                  * "no wiring" from "bytes arriving but not valid NMEA" - the
                  * latter is almost always the wrong baud rate. */
                 /*
@@ -1438,52 +1526,7 @@ static void gps_task(void *pvParameters)
                        (unsigned int)((uf & (uint32_t)kLPUART_NoiseErrorFlag) != 0U),
                        (unsigned int)((uf & (uint32_t)kLPUART_ParityErrorFlag) != 0U));
             }
-            else
-            {
-                int32_t  lat = d->lat_1e7;
-                int32_t  lon = d->lon_1e7;
-                uint32_t la  = (uint32_t)((lat < 0) ? -lat : lat);
-                uint32_t lo  = (uint32_t)((lon < 0) ? -lon : lon);
-
-                /* NAV-PVT frames since the last report, which with a 1 s
-                 * report period is the achieved navigation rate in Hz - the
-                 * number that says whether the configuration actually took. */
-                unsigned int rate_hz = (unsigned int)(d->pvt_count - last_pvt);
-
-#if GPS_PRINT_FIX
-                PRINTF("GPS %04u-%02u-%02u %02u:%02u:%02u fix=%u sats=%u %s  %s %u Hz"
-                       "  [pvt=%u gga=%u rmc=%u csum=%u/%u ovf=%u]\r\n",
-                       (unsigned int)d->year, d->month, d->day,
-                       d->hour, d->minute, d->second,
-                       d->fix_quality, d->satellites,
-                       d->position_valid ? "VALID" : "no-fix",
-                       d->from_ubx ? "UBX" : "NMEA", rate_hz,
-                       (unsigned int)d->pvt_count,
-                       (unsigned int)d->gga_count, (unsigned int)d->rmc_count,
-                       (unsigned int)d->checksum_errors,
-                       (unsigned int)d->ubx_csum_errors,
-                       (unsigned int)s_gps_ring_overflow);
-                PRINTF("    lat %c%u.%07u  lon %c%u.%07u  alt %d mm  spd %u mm/s\r\n",
-                       (lat < 0) ? '-' : '+', (unsigned int)(la / 10000000U), (unsigned int)(la % 10000000U),
-                       (lon < 0) ? '-' : '+', (unsigned int)(lo / 10000000U), (unsigned int)(lo % 10000000U),
-                       (int)d->alt_mm, (unsigned int)d->speed_mm_s);
-                if (d->from_ubx)
-                {
-                    /* NMEA carries no accuracy estimate, so this line only
-                     * means anything once NAV-PVT is the source. */
-                    PRINTF("    hAcc %u mm  vAcc %u mm  pDOP %u.%02u\r\n",
-                           (unsigned int)d->h_acc_mm, (unsigned int)d->v_acc_mm,
-                           (unsigned int)(d->pdop_1e2 / 100U),
-                           (unsigned int)(d->pdop_1e2 % 100U));
-                }
-#else
-                (void)rate_hz;
-                (void)lat; (void)lon; (void)la; (void)lo;
-#endif
-            }
-
             last_updates = updates;
-            last_pvt     = d->pvt_count;
             }
         }
     }

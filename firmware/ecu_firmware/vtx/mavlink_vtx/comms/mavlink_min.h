@@ -56,8 +56,14 @@
 #define MAVLINK_CRC_GPS_RAW_INT       24U
 #define MAVLINK_MSG_SCALED_IMU        26U
 #define MAVLINK_CRC_SCALED_IMU        170U
+#define MAVLINK_MSG_RAW_IMU           27U
+#define MAVLINK_CRC_RAW_IMU           144U /* confirmed: mavfwd's RAW_IMU validates */
 #define MAVLINK_MSG_ATTITUDE          30U
 #define MAVLINK_CRC_ATTITUDE          39U
+#define MAVLINK_MSG_NAMED_VALUE_FLOAT 251U
+/* Derived, not captured: the CRC_EXTRA derivation (x25 over the message and
+ * field names) reproduces all four hardware-confirmed constants above. */
+#define MAVLINK_CRC_NAMED_VALUE_FLOAT 170U
 #define MAVLINK_MSG_RADIO_STATUS      109U
 #define MAVLINK_CRC_RADIO_STATUS      185U /* confirmed against wfb-ng */
 
@@ -113,6 +119,29 @@ uint16_t mavlink_scaled_imu(uint8_t *out, size_t cap, mavlink_node_t *node,
                             uint32_t time_boot_ms, const int32_t acc_mg[3],
                             const int32_t gyro_mdps[3], const int16_t *mag_mgauss);
 
+/*!
+ * @brief RAW_IMU, base fields only: sensor counts exactly as read, no scaling.
+ * @param acc_raw   accelerometer LSB, sensor axes
+ * @param gyro_raw  gyro LSB, sensor axes
+ * @param mag_raw   may be NULL. 24-bit magnetometer counts, saturated into the
+ *                  int16 fields - only a magnet held against the board gets
+ *                  near that.
+ *
+ * The extension fields (id, temperature) are not sent, for the same reason
+ * GPS_RAW_INT's are not - see below.
+ */
+uint16_t mavlink_raw_imu(uint8_t *out, size_t cap, mavlink_node_t *node,
+                         uint64_t time_usec, const int16_t acc_raw[3],
+                         const int16_t gyro_raw[3], const int32_t *mag_raw);
+
+/*!
+ * @brief NAMED_VALUE_FLOAT: one labelled number, for status a standard message
+ *        has no field for. name is up to 10 characters, not NUL-terminated on
+ *        the wire when it is exactly 10.
+ */
+uint16_t mavlink_named_value_float(uint8_t *out, size_t cap, mavlink_node_t *node,
+                                   uint32_t time_boot_ms, const char *name, float value);
+
 /* GPS_FIX_TYPE */
 #define GPS_FIX_TYPE_NO_GPS     0U
 #define GPS_FIX_TYPE_NO_FIX     1U
@@ -144,8 +173,8 @@ uint16_t mavlink_gps_raw_int(uint8_t *out, size_t cap, mavlink_node_t *node,
                              uint16_t eph, uint16_t epv,
                              uint16_t vel_cm_s, uint16_t cog_cdeg);
 
-/*! @brief ATTITUDE, radians. Unused until the AHRS lands; here so the Euler
- *         work has somewhere to go. */
+/*! @brief ATTITUDE: Euler angles in radians, body rates in rad/s, from
+ *         nav/ahrs.c. */
 uint16_t mavlink_attitude(uint8_t *out, size_t cap, mavlink_node_t *node,
                           uint32_t time_boot_ms, float roll, float pitch,
                           float yaw, float rollspeed, float pitchspeed,

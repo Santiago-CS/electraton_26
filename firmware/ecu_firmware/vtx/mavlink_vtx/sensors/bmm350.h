@@ -37,8 +37,13 @@
 #define BMM350_SOFTRESET_DELAY_MS 24U
 #define BMM350_STARTUP_DELAY_MS   3U
 #define BMM350_MODE_DELAY_MS      10U
+#define BMM350_BR_DELAY_MS        14U /*!< bit reset */
+#define BMM350_FGR_DELAY_MS       18U /*!< flux-guide reset */
+/* Suspend to normal, first sample included. Bosch's figure grows with the
+ * averaging setting; this covers 8x. */
+#define BMM350_NORMAL_DELAY_MS    50U
 
-#define BMM350_SAMPLE_RATE_MS 200U /*!< how often the task polls */
+#define BMM350_SAMPLE_RATE_MS 40U /*!< how often the task polls: the 25 Hz ODR */
 
 typedef struct {
     i2c_ctrl_t *i2c;       /*!< already-initialised LPI2C port */
@@ -66,6 +71,9 @@ status_t bmm350_init(bmm350_t *dev);
 status_t bmm350_read_regs(bmm350_t *dev, uint8_t reg, uint8_t *buf, size_t len);
 status_t bmm350_write_reg(bmm350_t *dev, uint8_t reg, uint8_t value);
 status_t bmm350_chip_id(bmm350_t *dev, uint8_t *id);
+
+/*! @brief Read PMU_CMD_STATUS_0 - see BMM350_PMU_STATUS_* for the bits. */
+status_t bmm350_pmu_status(bmm350_t *dev, uint8_t *status);
 
 /*! @brief One burst read of the three magnetic axes and the temperature. */
 status_t bmm350_read_data(bmm350_t *dev, bmm350_data_t *out);

@@ -56,6 +56,9 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst, Gtk, Pango  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from wfb_gs import gs_start, gs_stop, preflight as wfb_preflight  # noqa: E402
+
 # GstVideo is only needed for the X11 window-id embedding path, and it comes
 # from a package that is not installed by default. Import it lazily so the
 # script still runs without it - see choose_embedding().
@@ -78,8 +81,6 @@ except ImportError:
 
 VIDEO_PORT = 5600
 TELEM_PORT = 14550
-WFB_CFG = "/etc/wifibroadcast.cfg"
-GS_UNIT = "wifibroadcast@gs"
 MAX_LINES = 3000
 
 # Layout. The terminal pane is a fixed width; the video takes the rest.
@@ -110,7 +111,23 @@ MAV_CRC_EXTRA = {
     27: 144,   # RAW_IMU
     26: 170,   # SCALED_IMU
     30: 39,    # ATTITUDE
+    251: 170,  # NAMED_VALUE_FLOAT
     109: 185,  # RADIO_STATUS  (confirmed against a captured frame)
+}
+
+
+# Motor controller values the firmware sends as NAMED_VALUE_FLOAT (names from
+# k_pmac_names in main.c), with how pmac_line() shows them.
+PMAC_FIELDS = {
+    "MOT_RPM":  ("speed", "{:.0f} rpm"),
+    "MOT_TRQ":  ("torque", "{:+.3f}"),
+    "BAT_A":    ("Ibat", "{:.1f} A"),
+    "CAP_V":    ("Vcap", "{:.1f} V"),
+    "MOT_TEMP": ("Tmot", "{:.0f} C"),
+    "HS_TEMP":  ("Ths", "{:.0f} C"),
+    "IQ_A":     ("Iq", "{:.1f} A"),
+    "ID_A":     ("Id", "{:.1f} A"),
+    "MOD_PCT":  ("mod", "{:.0f}%"),
 }
 
 
@@ -170,7 +187,25 @@ def mav_describe(msgid, pl):
         if not any((t_us, ax, ay, az, gx, gy, gz, mx, my, mz)):
             return f"RAW_IMU (all sensor fields zero){ext}"
         return (f"RAW_IMU {t_us / 1e6:10.2f}s a{ax:+7d}{ay:+7d}{az:+7d} "
-                f"g{gx:+7d}{gy:+7d}{gz:+7d} m{mx:+6d}{my:+6d}{mz:+6d}{ext}")
+                f"g{gx:+7d}{gy:+7d}{gz:+7d} m{mx:+7d}{my:+7d}{mz:+7d}{ext}")
+    if msgid == 30:
+        pl = pl.ljust(28, b"\x00")
+        t_ms, = struct.unpack_from("<I", pl, 0)
+        roll, pitch, yaw, p, q, r = struct.unpack_from("<6f", pl, 4)
+        d = 57.29578
+        return (f"ATTITUDE {t_ms / 1000.0:8.2f}s "
+                f"roll {roll * d:+7.2f} pitch {pitch * d:+7.2f} yaw {yaw * d:+7.2f} deg  "
+                f"rates {p * d:+6.1f}{q * d:+6.1f}{r * d:+6.1f}dps")
+    if msgid == 251:
+        pl = pl.ljust(18, b"\x00")
+        t_ms, value = struct.unpack_from("<If", pl, 0)
+        name = pl[8:18].split(b"\x00", 1)[0].decode("ascii", "replace")
+        if name == "MAG_STATE":
+            label = {0: "unverified", 1: "trusted", 2: "DROPPED (disagrees with GPS)"}
+            return f"MAG_STATE {label.get(int(value), value)}"
+        # 6 significant digits, not fixed decimals: torque is a fraction
+        # (0.512) and rpm is thousands, and pmac_line() reformats it anyway.
+        return f"{name} {value:+.6g}"
     if msgid == 109:
         pl = pl.ljust(9, b"\x00")
         rxerr, fixed = struct.unpack_from("<HH", pl, 0)
@@ -302,74 +337,9 @@ def frame_valid_at(buf, i):
 # Receiver bring-up
 # --------------------------------------------------------------------------
 
-def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
-
-
 def preflight():
-    """Check the things the runbook checks. Reports; never fatal - a warning
-    that turns out not to matter is better than refusing to start."""
-    notes = []
-
-    ifaces = [ln.split()[0] for ln in run(["ip", "-br", "link"]).stdout.splitlines()
-              if ln.startswith("wlx")]
-    if not ifaces:
-        notes.append("WARN  no wlx* interface - is the USB-C receiver plugged in?")
-    else:
-        for name in ifaces:
-            drv = run(["ethtool", "-i", name]).stdout.splitlines()
-            drv = drv[0].split(":", 1)[1].strip() if drv else "?"
-            if drv == "rtl88xxau_wfb":
-                notes.append(f"ok    {name}: driver {drv}")
-            else:
-                notes.append(f"WARN  {name}: driver {drv!r}, expected rtl88xxau_wfb")
-                notes.append("      sudo modprobe -r rtw88_8812au && sudo modprobe 88XXau_wfb")
-                notes.append("      then unplug and replug the receiver (runbook step 2)")
-
-    if os.path.exists(WFB_CFG):
-        chan = ""
-        try:
-            with open(WFB_CFG) as fh:
-                for line in fh:
-                    if line.strip().startswith("wifi_channel"):
-                        chan = line.split("=", 1)[1].strip()
-        except OSError:
-            pass
-        notes.append(f"ok    {WFB_CFG}: wifi_channel = {chan or '?'}")
-    else:
-        notes.append(f"WARN  {WFB_CFG} missing")
-
-    notes.append("ok    /etc/gs.key present" if os.path.exists("/etc/gs.key")
-                 else "WARN  /etc/gs.key missing - the link will not decrypt")
-    return notes
-
-
-def gs_active():
-    return run(["systemctl", "is-active", GS_UNIT]).stdout.strip() == "active"
-
-
-def gs_start():
-    """Returns True if this call started it (so we should stop it on exit)."""
-    if gs_active():
-        print(f"{GS_UNIT} already running - leaving it alone")
-        return False
-    print(f"starting {GS_UNIT} (sudo may prompt)...")
-    res = run(["sudo", "systemctl", "start", GS_UNIT])
-    if res.returncode != 0:
-        print(res.stderr.strip() or f"could not start {GS_UNIT}", file=sys.stderr)
-        return False
-    for _ in range(20):
-        if gs_active():
-            print(f"{GS_UNIT} active")
-            return True
-        time.sleep(0.25)
-    print(f"WARN  {GS_UNIT} did not become active", file=sys.stderr)
-    return False
-
-
-def gs_stop():
-    print(f"stopping {GS_UNIT}...")
-    run(["sudo", "systemctl", "stop", GS_UNIT])
+    """The runbook's checks (wfb_gs.py), as the text lines this window shows."""
+    return [f"{level:<6}{text}" for level, text in wfb_preflight()]
 
 
 # --------------------------------------------------------------------------
@@ -390,7 +360,8 @@ class GroundStation(Gtk.Window):
         self.mav_seq = {}    # (sysid, compid) -> last seq byte
         self.mav_seen = {}   # (sysid, compid) -> frames
         self.mav_gaps = {}   # (sysid, compid) -> missing frames
-        self.imu_shown = 0
+        self.imu_shown = {}  # per message kind, see parse()
+        self.pmac = {}       # latest motor controller values, see pmac_line()
         self.rx_buf = bytearray()
         self.kinds = set()
         self.w_frames = self.w_bytes = self.w_lost = 0
@@ -510,6 +481,15 @@ class GroundStation(Gtk.Window):
         self.log(f"ok    listening for telemetry on udp:{TELEM_PORT}")
         GLib.io_add_watch(self.sock.fileno(), GLib.IO_IN, self.on_telemetry)
 
+        # A copy of every telemetry datagram for vtx_dashboard.py, which
+        # cannot have udp:14550 while this program does. Sending to a port
+        # nobody listens on costs nothing - UDP just drops it.
+        self.fwd = None
+        if self.args.forward:
+            self.fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.fwd_addr = ("127.0.0.1", self.args.forward)
+            self.log(f"ok    forwarding telemetry to udp:{self.args.forward} (vtx_dashboard.py)")
+
     def on_telemetry(self, _fd, _cond):
         while True:
             try:
@@ -518,6 +498,11 @@ class GroundStation(Gtk.Window):
                 break
             self.t_bytes += len(data)
             self.w_bytes += len(data)
+            if self.fwd is not None:
+                try:
+                    self.fwd.sendto(data, self.fwd_addr)
+                except OSError:
+                    pass
             if self.raw_btn.get_active():
                 self.log(f"  raw {len(data):4d}B  " + data[:32].hex(" "))
             self.rx_buf += data
@@ -603,13 +588,27 @@ class GroundStation(Gtk.Window):
                                 self.mav_gaps[key] = self.mav_gaps.get(key, 0) + gap
                         self.mav_seq[key] = seq
                         self.mav_seen[key] = self.mav_seen.get(key, 0) + 1
-                    # 50 Hz of SCALED_IMU buries everything else, and appending
-                    # that fast is real work for the main thread, which is also
-                    # the one painting the video. Thin out the IMU lines only;
-                    # every other message is rare and worth seeing.
-                    if text.startswith(("SCALED_IMU", "RAW_IMU")):
-                        self.imu_shown += 1
-                        if self.imu_shown % self.args.every:
+                    # 50 Hz of IMU or attitude buries everything else, and
+                    # appending that fast is real work for the main thread,
+                    # which is also the one painting the video. Thin out those
+                    # lines only; every other message is rare and worth seeing.
+                    # Counted per kind: one shared counter would show only one
+                    # of two kinds that alternate.
+                    kind = text.split(" ", 1)[0]
+                    # Motor controller values arrive ~50 a second, one
+                    # NAMED_VALUE_FLOAT each. Keep the latest and show them as
+                    # one line when the 1 Hz PMAC_LINK status comes in.
+                    if kind in PMAC_FIELDS or kind in ("PMAC_NMT", "PMAC_FLT"):
+                        parts = text.split()
+                        if len(parts) >= 2:
+                            self.pmac[kind] = parts[1]
+                        continue
+                    if kind == "PMAC_LINK":
+                        self.log(self.pmac_line(text))
+                        continue
+                    if kind in ("SCALED_IMU", "RAW_IMU", "ATTITUDE"):
+                        self.imu_shown[kind] = self.imu_shown.get(kind, 0) + 1
+                        if self.imu_shown[kind] % self.args.every:
                             continue
                     self.log(text)
                 continue
@@ -642,6 +641,35 @@ class GroundStation(Gtk.Window):
         self.log(f"IMU {got['seq']:5d} {got['t_us'] / 1e6:8.2f}s "
                  f"a{a[0]:+6.2f}{a[1]:+6.2f}{a[2]:+6.2f}g "
                  f"w{g[0]:+7.1f}{g[1]:+7.1f}{g[2]:+7.1f}dps {t:4.1f}C")
+
+    def pmac_line(self, text):
+        """One line for the motor controller: link state, then every value the
+        firmware has sent since the last line."""
+        parts = text.split()
+        try:
+            link = int(float(parts[1]))
+        except (IndexError, ValueError):
+            link = -1
+        state = {0: "NO DATA from Linux (can2m33 not running, or RPMsg down)",
+                 1: "Linux up, NO CAN (bus down or controller off)",
+                 2: "LIVE"}.get(link, f"#{link}")
+        if link != 2:
+            self.pmac.clear()
+            return f"PMAC {state}"
+        out = [f"PMAC {state}"]
+        nmt = self.pmac.get("PMAC_NMT")
+        if nmt is not None:
+            n = int(float(nmt))
+            out.append({5: "Operational", 127: "Pre-op", 4: "Stopped",
+                        0: "boot-up", 255: "no heartbeat"}.get(n, f"nmt {n}"))
+        for key, (label, fmt) in PMAC_FIELDS.items():
+            if key in self.pmac:
+                out.append(f"{label} {fmt.format(float(self.pmac[key]))}")
+        flt = self.pmac.get("PMAC_FLT")
+        if flt is not None and int(float(flt)) != 0:
+            out.append(f"FAULT 0x{int(float(flt)):04X}")
+        self.pmac.clear()
+        return "  ".join(out)
 
     # ---- video ----
 
@@ -676,22 +704,41 @@ class GroundStation(Gtk.Window):
         #  queue        udpsrc pushes synchronously, so if the decoder stalls
         #               for a moment the socket stops being read and fills.
         #               A queue gives the socket its own thread to drain into.
+        #
+        # And one about latency. Every stage above is FIFO and none drops, so
+        # if display runs slower than the stream - measured: ~43 fps shown
+        # against the VTX's 60 - the difference piles up in that 8 MB socket
+        # as tens of seconds of delay, then overflows it. The leaky one-frame
+        # queue after the decoder is the only place frames may be dropped:
+        # decoded pictures are independent, so discarding a late one costs
+        # nothing, where dropping RTP packets earlier would corrupt the next
+        # frames until a keyframe. Display then always shows the newest frame.
         pipe_core = (f"udpsrc port={VIDEO_PORT} buffer-size={self.args.sockbuf} "
                      f"caps=application/x-rtp,media=video,clock-rate=90000,"
                      f"encoding-name={enc} ! queue ! {jitter}{depay} ! {parse} ! "
-                     f"{dec} ! videoconvert")
+                     f"{dec} ! queue max-size-buffers=1 max-size-bytes=0 "
+                     f"max-size-time=0 leaky=downstream ! videoconvert")
 
         # Three ways to get a picture, in order of preference:
         #
-        #   widget  gtksink renders straight into a Gtk widget. The only path
-        #           that also works on Wayland. Needs gstreamer1.0-gtk3.
+        #   widget  gtkglsink or gtksink renders straight into a Gtk widget.
+        #           The only path that also works on Wayland. Needs
+        #           gstreamer1.0-gtk3. gtkglsink is preferred: plain gtksink
+        #           converts and scales every 1080p frame with the CPU on the
+        #           GTK main thread, which was most of why display fell
+        #           behind 60 fps. --render cairo forces gtksink.
         #   xid     hand xvimagesink an X11 window id. No extra GStreamer
         #           plugin, but needs the GstVideo typelib and X11.
         #   extern  neither available: run the runbook's own gst-launch
         #           pipeline in its own window. Not embedded, but it works
         #           with nothing installed beyond what the runbook already
         #           requires, which matters more than the layout.
-        if Gst.ElementFactory.find("gtksink"):
+        use_gl = (self.args.render == "gl" and Gst.ElementFactory.find("gtkglsink")
+                  and Gst.ElementFactory.find("glsinkbin"))
+        if use_gl:
+            self.embed = "widget"
+            sink = "glsinkbin name=vsink sink=gtkglsink"
+        elif Gst.ElementFactory.find("gtksink"):
             self.embed = "widget"
             sink = "gtksink name=vsink"
         elif HAVE_GSTVIDEO and Gst.ElementFactory.find("xvimagesink") and os.environ.get("DISPLAY"):
@@ -720,7 +767,8 @@ class GroundStation(Gtk.Window):
 
         desc = f"{pipe_core} ! {sink} sync=false"
         self.log(f"video: {dec} ({'hardware' if dec == hw else 'software'}), "
-                 f"{self.embed} embedding, socket {self.args.sockbuf // 1000} kB")
+                 f"{self.embed} embedding ({'GL' if use_gl else 'no GL'}), "
+                 f"socket {self.args.sockbuf // 1000} kB")
 
         try:
             self.pipeline = Gst.parse_launch(desc)
@@ -732,7 +780,9 @@ class GroundStation(Gtk.Window):
         vsink = self.pipeline.get_by_name("vsink")
 
         if self.embed == "widget":
-            self.video_widget = vsink.props.widget
+            # glsinkbin wraps the gtkglsink that owns the widget.
+            inner = vsink.props.sink if use_gl else vsink
+            self.video_widget = inner.props.widget
             self.video_holder.pack_start(self.video_widget, True, True, 0)
             self.video_widget.show()
         else:
@@ -836,6 +886,9 @@ def main():
                     help="same as --decoder hw")
     ap.add_argument("--sw", dest="decoder", action="store_const", const="sw",
                     help="same as --decoder sw")
+    ap.add_argument("--render", choices=("gl", "cairo"), default="gl",
+                    help="gl (default) draws video with gtkglsink on the GPU; "
+                         "cairo uses plain gtksink, if GL misbehaves")
     ap.add_argument("--sockbuf", type=int, default=4_000_000, metavar="BYTES",
                     help="UDP receive buffer for the video socket (default 4 MB; "
                          "the kernel caps it at net.core.rmem_max)")
@@ -843,9 +896,12 @@ def main():
                     help="insert rtpjitterbuffer with this latency "
                          "(default 0 = off, matching the runbook pipeline)")
     ap.add_argument("--every", type=int, default=10, metavar="N",
-                    help="show every Nth IMU line, raw or MAVLink (default 10; "
+                    help="show every Nth IMU and ATTITUDE line (default 10; "
                          "other messages are always shown). Loss accounting "
                          "always sees every frame.")
+    ap.add_argument("--forward", type=int, default=14560, metavar="PORT",
+                    help="copy every telemetry datagram to this local UDP port for "
+                         "vtx_dashboard.py (default 14560, 0 = off)")
     ap.add_argument("--baud", type=int, default=115200,
                     help="link rate the telemetry percentage is measured against")
     args = ap.parse_args()

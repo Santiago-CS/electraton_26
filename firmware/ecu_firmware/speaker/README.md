@@ -8,7 +8,7 @@ bank through the board's audio out.
 
 ```bash
 sudo apt install build-essential libasound2-dev
-gcc -O2 -o drive_kbd drive_kbd.c can_feed.c -lasound -lm -lpthread
+gcc -O2 -o drive_kbd drive_kbd.c can_feed.c pmac.c -lasound -lm -lpthread
 ./drive_kbd
 ```
 
@@ -16,8 +16,10 @@ Hold ↑ to accelerate. Details in §3.
 
 ```
   Sevcon PMAC controller
-        │ CANopen TPDO (0x606C velocity, 0x6077 torque)
+        │ CANopen TPDOs, every 40 ms (606Ch velocity in 0x454, torque in 0x271)
         ▼
+  pmac.c ── decodes all five TPDOs, SYNC, heartbeat, EMCY
+        │
   can_feed.c ── reader thread ── smoothing ── virtual gearbox
         │                                   │
         │ engine rpm                        │ load 0..1
@@ -35,19 +37,19 @@ Hold ↑ to accelerate. Details in §3.
 
 | file | role |
 |---|---|
-| `sampler.c` | the runtime: sample bank, crossfade engine, ALSA output |
-| `can_feed.c` / `can_feed.h` | SocketCAN reader thread, TPDO decode, virtual gearbox (`canfeed_map()`) |
+| `sampler.c` | the board program `speaker`: sample bank, crossfade engine, ALSA output, command line (`--help`) |
+| `pmac.c` / `pmac.h` | PMAC CANopen decoder: the TPDO map from the configuration spreadsheet, plus SYNC, heartbeat, EMCY and text/CSV output |
+| `can_feed.c` / `can_feed.h` | SocketCAN reader thread feeding `pmac.c`, smoothing, virtual gearbox (`canfeed_map()`) |
 | `drive_kbd.c` | keyboard test drive for a desktop terminal — simulated motor, real gearbox + sampler |
-| `make_v8_pack.py` | physically modelled cross-plane V8 pack generator, 3 exhaust tones — no downloads needed |
-| `trim_loop.py` | cuts real recordings into seamless integer-cycle loops |
 | `engine_sim.c` | standalone procedural synth, no samples. Fallback / reference |
 | `samples/` | default pack, **sport** exhaust: 14 rpm points × 2 load layers + `manifest.txt` |
-| `samples_straight/` | straight-through exhaust — sharpest, raspiest |
-| `samples_stock/` | stock muffled road car |
-| `samples_soft/` | the original v1 pack, kept for A/B comparison |
-| `compare_tones.wav` | the same full-throttle pull through all four packs: soft v1 → stock → sport → straight |
-| `demo_drive.wav` | 24 s scripted drive through the keyboard demo's code path: neutral blip, full pull through 4 gears, lift, brake, part throttle |
-| `demo_mustang_v8.wav` | 30 s offline render of the free-revving engine model (no gearbox) |
+
+**Not in this folder yet:** `make_v8_pack.py` (the V8 pack generator),
+`trim_loop.py` (cuts real recordings into loops), the alternative packs
+`samples_straight/`, `samples_stock/` and `samples_soft/`, and the demo
+renders `compare_tones.wav`, `demo_drive.wav` and `demo_mustang_v8.wav`. §8
+and §9 describe how to use the two scripts; only `samples/` ships here, so
+`V8_PACK` has nothing else to point at until they are added.
 
 `engine_sim.c` is independent of everything else. Keep it — it's useful when
 you want to hear a change without regenerating a pack, and it's the smaller
@@ -58,31 +60,32 @@ footprint option if you ever need to run this on an MCU instead.
 ## 2. Build matrix
 
 ```bash
-sudo apt install libasound2-dev python3-numpy python3-scipy
+sudo apt install libasound2-dev
+
+# the board program: CAN feedback -> decode -> virtual engine -> ALSA
+gcc -O2 -o speaker sampler.c can_feed.c pmac.c -lasound -lm -lpthread
+./speaker                  # engine sound + PMAC decode printed live, on can0
+./speaker -q               # engine sound only
+./speaker --no-audio can0  # decode only - verify the bus before touching audio
+./speaker --csv            # decode as CSV, one row per 40 ms cycle
+./speaker -r capture.log   # replay a candump log: decode + gearbox, no sound
+./speaker --sim            # bench: simulated throttle ramp, no controller
+./speaker --help           # everything else (-v, -n node, -T rated Nm, -g volume)
 
 # keyboard test drive on a desktop (arrow keys)
-gcc -O2 -o drive_kbd drive_kbd.c can_feed.c -lasound -lm -lpthread
+gcc -O2 -o drive_kbd drive_kbd.c can_feed.c pmac.c -lasound -lm -lpthread
 ./drive_kbd
 
-# full system: CAN feedback -> sampler -> ALSA   (after the §5 patch)
-gcc -O2 -o sampler sampler.c can_feed.c -lasound -lm -lpthread
-
-# sampler alone, simulated throttle ramp (bench work, no controller)
-gcc -O2 -o sampler_sim sampler.c -lasound -lm
-
-# offline render to WAV, no audio hardware needed
+# offline render to WAV, no CAN, no audio hardware
 gcc -O2 -DOFFLINE -o sampler_off sampler.c -lm
 ./sampler_off demo.wav
-
-# CAN decode only — verify your TPDO mapping before touching audio
-gcc -O2 -DCANFEED_TEST -o canfeed can_feed.c -lm -lpthread
-./canfeed can0
 
 # procedural synth, no samples
 gcc -O2 -o engine_sim engine_sim.c -lasound -lm
 ```
 
 All targets build clean under `-Wall -Wextra`, linked against real libasound.
+Anything that links `can_feed.c` needs `pmac.c` too: the decoder lives there.
 
 `sampler.c` has no `main()` when compiled with `-DSAMPLER_NO_MAIN`; that is how
 `drive_kbd.c` reuses the sample bank and `render()` without copying them.
@@ -99,7 +102,7 @@ car runs. What you hear here is what the car will play.
 ```bash
 sudo apt install build-essential libasound2-dev
 cd speaker
-gcc -O2 -o drive_kbd drive_kbd.c can_feed.c -lasound -lm -lpthread
+gcc -O2 -o drive_kbd drive_kbd.c can_feed.c pmac.c -lasound -lm -lpthread
 ./drive_kbd
 ```
 
@@ -145,13 +148,15 @@ car; tune `can_feed.c` for anything the car should inherit.
 ## 4. Audio setup on the board
 
 ```bash
-python3 make_v8_pack.py          # -> samples/   (skip if using the shipped pack)
-aplay -l                         # find the SAI codec card,device
-ALSA_DEV=plughw:0,0 ./sampler
+aplay -l                         # find the output card,device
+ALSA_DEV=plughw:0,0 ./speaker
 ```
 
-Environment overrides: `ALSA_DEV`, `V8_PACK` (pack directory), `CAN_IF`, and
-the `TONE_*` knobs in §4.1.
+On the FRDM i.MX93 the output is the MQS (`card 0: mqsaudio`), so
+`plughw:0,0` is the one to try if `default` gives nothing.
+
+Environment overrides: `ALSA_DEV`, `V8_PACK` (pack directory), `CAN_IF`,
+`VOLUME`, and the `TONE_*` knobs in §4.1.
 
 ### 4.1 Brightness that tracks the engine
 
@@ -212,7 +217,7 @@ At the default it eases over ~300 ms instead.
 Tuning by ear: `TONE_RPM_HI` is the main dial — lower it if the sound stays
 dull too far up the rev range, raise it if the fizz comes back too early.
 `TONE_IDLE_DB` sets how dark idle gets. Because the stage sits at the end of
-`render()`, the CAN-driven `sampler` inherits all of it unchanged; this is a
+`render()`, the CAN-driven `speaker` inherits all of it unchanged; this is a
 voicing fix, not a keyboard-demo fix.
 
 ---
@@ -227,7 +232,12 @@ ip -details -statistics link show can0
 ```
 
 Check the bitrate against the controller's config. A mismatch shows as a
-rising `bus-error` count, not as silence.
+rising `bus-error` count, not as silence. The PMAC here runs 500 kbit/s,
+node 1, with a SYNC every 40 ms.
+
+If `ip link show type can` lists nothing, the kernel has no CAN interface at
+all - the device tree does not enable one - and `./speaker` stops with
+`cannot open can0`. `--sim` and `-r` still work.
 
 ### Verify the mapping before writing code
 
@@ -248,63 +258,49 @@ Two causes of "no frames at all":
   producer, it never fires. Add a SYNC producer, or set the TPDO to
   event-driven (type 255) with an event timer in `0x1800:05`.
 
-### Configure the decode
+### The decode
 
-Edit `F_RPM` and `F_TRQ` at the top of `can_feed.c`. **The shipped offsets are
-placeholders** — take the real COB-ID, byte offset, width and sign from the
-TPDO configuration spreadsheet.
+`pmac.c` holds the TPDO map from "CAN Open RD TPDO Configuration.xlsx", row
+for row, checked against candump captures of the real controller: every TPDO
+arrives with exactly the payload length the map implies. Byte offsets are not
+written down - CANopen packs mapped objects in order, little-endian - so if
+the controller is remapped, edit the rows of that TPDO and the rest follows.
+
+| TPDO | COB-ID | contents |
+|---|---|---|
+| 1 | 0x391 | Id/Iq targets and actuals |
+| 2 | 0x330 | Ud, Uq, modulation, inductance |
+| 3 | 0x411 | field weakening limits, motor temperature |
+| 4 | 0x271 | capacitor voltage, heatsink temperature, battery current, **torque** |
+| 5 | 0x454 | digital inputs, **speed** |
+
+Two of these drive the engine, chosen by `ENG_RPM_SIG` / `ENG_TRQ_SIG` at the
+top of `can_feed.c`:
 
 | object | drives | notes |
 |---|---|---|
-| `0x606C` velocity actual | virtual engine rpm → pitch | rpm by default, but internal units if velocity scaling (`0x608F`, `0x6096`) is configured. Confirm against a tacho. |
-| `0x6077` torque actual | load blend → timbre | per-thousand of rated torque |
-| `0x6078` current actual | alternative to `0x6077` | set `scale` to 1/Imax, works identically |
+| `606Ch` velocity actual (TPDO5) | virtual engine rpm → pitch | rpm by default, but internal units if velocity scaling (`0x608F`, `0x6096`) is configured. Confirm against a tacho. |
+| `2020h/6` actual torque (TPDO4) | load blend → timbre | thousandths of the rated torque in `2916h/1` |
 
 Torque is a better load signal than a pedal would be: it captures current
 limiting, thermal foldback and traction events for free, and negative torque
 (regen) lands naturally on the overrun layer — engine braking and regen
 braking are the same gesture.
 
-### Wire into `sampler.c`
+### How `speaker` uses it
 
-Add near the top:
-
-```c
-#include "can_feed.h"
-```
-
-Replace the realtime `for(;;)` body with:
-
-```c
-    if (canfeed_start(getenv("CAN_IF") ? getenv("CAN_IF") : "can0")) return 1;
-
-    Feed fb;
-    float fade = 0.0f;
-    int16_t out[PERIOD];
-
-    for (;;) {
-        canfeed_update(&fb, Ts);
-        render(buf, PERIOD, fb.rpm, fb.load);
-
-        float target = fb.live ? (fb.shifting ? 0.35f : 1.0f) : 0.0f;
-        for (int i = 0; i < PERIOD; i++) {
-            fade += (target - fade) * 0.004f;       /* ~85 ms, no clicks */
-            float s = buf[i] * 1.75f * fade;
-            if (s >  1.0f) s =  1.0f;
-            if (s < -1.0f) s = -1.0f;
-            out[i] = (int16_t)(s * 30000.0f);
-        }
-        snd_pcm_sframes_t n = snd_pcm_writei(pcm, out, PERIOD);
-        if (n < 0) snd_pcm_recover(pcm, (int)n, 1);
-    }
-```
-
-`engine_step()` and `read_pedal()` become dead code. Keep them for a `--sim`
-bench mode with the controller unpowered.
+`main()` in `sampler.c` starts the reader thread (`canfeed_start()`), then
+once per 256-sample audio block calls `canfeed_update()` for the engine rpm
+and load, renders, and fades the output toward 1, 0.35 while a virtual shift
+is in progress, or 0 when the feed is dead. All printing happens on the CAN
+thread through a hook, never in the audio loop. `engine_step()` and
+`read_pedal()` remain for `--sim`.
 
 ### Failsafe
 
-No frame for 250 ms → `live` goes false → audio fades out over ~85 ms. On a
+Speed or torque older than 250 ms → `live` goes false → audio fades out over
+~85 ms. Both have to be fresh: they arrive in different TPDOs, and a feed
+that stayed live on torque alone would hold the pitch at the last speed. On a
 vehicle this matters: a stuck engine note after a bus fault is worse than
 silence, because it tells the driver the car is doing something it isn't.
 
@@ -312,11 +308,11 @@ silence, because it tells the driver the car is doing something it isn't.
 
 ## 6. Three things that will bite you
 
-**Rate mismatch.** TPDOs arrive at 10–100 Hz; the audio control loop runs at
-~190 Hz. Raw frame values straight to pitch give a zipper on every frame
-boundary. `canfeed_map()` runs a 35 ms one-pole plus a 9000 rpm/s slew
-limit. If your TPDO rate is at the low end, lengthen the time constant rather
-than accepting the steps.
+**Rate mismatch.** TPDOs arrive at 10–100 Hz - 25 Hz on this controller - and
+the audio control loop runs at ~190 Hz. Raw frame values straight to pitch give
+a zipper on every frame boundary. `canfeed_map()` runs a 60 ms one-pole
+(`RPM_TAU`, `TRQ_TAU`) plus a 9000 rpm/s slew limit. If the TPDO rate drops,
+lengthen the time constant rather than accepting the steps.
 
 **Never read CAN from the audio path.** The blocking `read()` is on its own
 thread. One blocking call in the ALSA loop is an instant xrun.
@@ -340,7 +336,7 @@ drivetrain, not the datasheet ceiling, then tune `UPSHIFT[]` and `GRATIO[]`.
 | rpm drop on shift too big/small | `GRATIO[]` ratio spacing |
 | hunting between two gears | raise `DOWNSHIFT_HYST` toward 0.8 |
 | pitch steps or warbles | lengthen the one-pole in `canfeed_map()` |
-| too quiet / clipping | master gain at the bottom of `main()` |
+| too quiet / clipping | `-g` / `VOLUME` (0.1–2.0); the fixed gain is `1.75f` in the output loop of `main()` |
 | sounds thin at low rpm | add rpm points below 1500 — that's where the ear is most sensitive |
 
 ---
@@ -537,8 +533,9 @@ the same rpm.
 |---|---|
 | `cannot open samples/manifest.txt` | run `make_v8_pack.py`, or set `V8_PACK` |
 | `need 16-bit PCM` | re-encode: `ffmpeg -i in.wav -acodec pcm_s16le out.wav` |
-| silence, `canfeed` shows `DEAD` | bus down, wrong bitrate, controller not Operational, or no SYNC producer |
-| `canfeed` shows LIVE but rpm stuck at 0 | wrong COB-ID or byte offset — go back to `cansniffer` |
+| `speaker: cannot open can0` | no CAN interface (`ip link show type can`), or it is down - see §5 |
+| silence, `ENGINE DEAD` in the decode | bus down, wrong bitrate, controller not Operational, no SYNC producer - or one of speed/torque missing |
+| `ENGINE LIVE` but rpm stuck at 0 | speed TPDO remapped — compare `candump` with the map in `pmac.c` |
 | rpm value wildly wrong | velocity scaling configured; it's in internal units, not rpm |
 | clicking at regular intervals | loop isn't an integer number of cycles — rerun `trim_loop.py --scan` |
 | pitch steps as it revs | resample ratio clamped: widen `RATIO_MIN`/`RATIO_MAX`, or add rpm points |
@@ -556,8 +553,9 @@ the same rpm.
 - All targets compile and link against libasound. `drive_kbd` was checked on
   a pseudo-terminal with simulated key auto-repeat into a paced null sink —
   not yet listened to on real speakers.
-- The CAN decode has not been run against live controller traffic. `F_RPM` and
-  `F_TRQ` offsets are placeholders until confirmed against the spreadsheet.
+- The decode is checked against candump captures of the controller, but the
+  engine rpm it produces has not been confirmed against a tachometer (see
+  the `606Ch` note in §5).
 - Mono only. Stereo would want two slightly different pipe detunes panned
   apart — cheap to add, meaningful improvement on a two-speaker install.
 - No start/stop sounds. Cranking and shutdown are one-shots, not loops, and

@@ -71,16 +71,21 @@
  * board's missing 2.2k resistors (I2C_INTERNAL_PULLUP in pin_mux.c), 400 kHz
  * has no chance of meeting the rise time. Drop both buses to 100 kHz so the
  * diagnostic is actually testing the bus and not the edge rate.
+ *
+ * I2C_MASTER_BAUDRATE can be set from the build to override that, now that
+ * the board resistors are fitted and the internal pull-ups only add to them.
  */
 #ifndef I2C_INTERNAL_PULLUP
 #define I2C_INTERNAL_PULLUP 0
 #endif
 
 #define I2C_MASTER_BASEADDR        (LPI2C4)
+#ifndef I2C_MASTER_BAUDRATE
 #if I2C_INTERNAL_PULLUP
 #define I2C_MASTER_BAUDRATE        100000U /* weak pull-ups: see above */
 #else
 #define I2C_MASTER_BAUDRATE        400000U /* 400 kHz fast mode */
+#endif
 #endif
 #define I2C_MASTER_DMA_BASE        DMA4
 #define I2C_MASTER_DMA_RX_CHANNEL  4U

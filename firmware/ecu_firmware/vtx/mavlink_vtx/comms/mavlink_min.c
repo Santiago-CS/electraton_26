@@ -208,6 +208,29 @@ uint16_t mavlink_scaled_imu(uint8_t *out, size_t cap, mavlink_node_t *node,
                          MAVLINK_CRC_SCALED_IMU, pl, (uint8_t)i);
 }
 
+uint16_t mavlink_raw_imu(uint8_t *out, size_t cap, mavlink_node_t *node,
+                         uint64_t time_usec, const int16_t acc_raw[3],
+                         const int16_t gyro_raw[3], const int32_t *mag_raw)
+{
+    uint8_t  pl[26];
+    uint32_t i = 0U;
+
+    i = put_u64(pl, i, time_usec);
+
+    for (uint32_t a = 0U; a < 3U; a++) {
+        i = put_i16(pl, i, acc_raw[a]);
+    }
+    for (uint32_t a = 0U; a < 3U; a++) {
+        i = put_i16(pl, i, gyro_raw[a]);
+    }
+    for (uint32_t a = 0U; a < 3U; a++) {
+        i = put_i16(pl, i, (mag_raw != NULL) ? sat_i16(mag_raw[a]) : (int16_t)0);
+    }
+
+    return mavlink_build(out, cap, node, MAVLINK_MSG_RAW_IMU,
+                         MAVLINK_CRC_RAW_IMU, pl, (uint8_t)i);
+}
+
 uint16_t mavlink_gps_raw_int(uint8_t *out, size_t cap, mavlink_node_t *node,
                              uint64_t time_usec, uint8_t fix_type, uint8_t sats,
                              int32_t lat_1e7, int32_t lon_1e7, int32_t alt_mm,
@@ -230,6 +253,26 @@ uint16_t mavlink_gps_raw_int(uint8_t *out, size_t cap, mavlink_node_t *node,
 
     return mavlink_build(out, cap, node, MAVLINK_MSG_GPS_RAW_INT,
                          MAVLINK_CRC_GPS_RAW_INT, pl, (uint8_t)i);
+}
+
+uint16_t mavlink_named_value_float(uint8_t *out, size_t cap, mavlink_node_t *node,
+                                   uint32_t time_boot_ms, const char *name, float value)
+{
+    uint8_t  pl[18];
+    uint32_t i = 0U;
+    uint32_t k;
+
+    i = put_u32(pl, i, time_boot_ms);
+    i = put_f32(pl, i, value);
+    for (k = 0U; (k < 10U) && (name != NULL) && (name[k] != '\0'); k++) {
+        i = put_u8(pl, i, (uint8_t)name[k]);
+    }
+    for (; k < 10U; k++) {
+        i = put_u8(pl, i, 0U);
+    }
+
+    return mavlink_build(out, cap, node, MAVLINK_MSG_NAMED_VALUE_FLOAT,
+                         MAVLINK_CRC_NAMED_VALUE_FLOAT, pl, (uint8_t)i);
 }
 
 uint16_t mavlink_attitude(uint8_t *out, size_t cap, mavlink_node_t *node,

@@ -23,6 +23,11 @@ sampler_off
 canfeed
 engine_sim
 tone_probe
+# Anchored: a bare "can2m33" would also match the can2m33/ source folder.
+/firmware/ecu_firmware/vtx/can2m33/can2m33
+/firmware/ecu_firmware/vtx/can2m33/can2m33_test
+# vtx_dashboard.py CSV recordings
+/firmware/ecu_firmware/vtx/mavlink_vtx/tools/logs/
 *.o
 *.a
 *.so

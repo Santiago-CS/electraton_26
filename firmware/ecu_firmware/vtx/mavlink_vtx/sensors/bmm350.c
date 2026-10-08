@@ -57,6 +57,11 @@ status_t bmm350_chip_id(bmm350_t *dev, uint8_t *id)
     return bmm350_read_regs(dev, BMM350_REG_CHIP_ID, id, 1U);
 }
 
+status_t bmm350_pmu_status(bmm350_t *dev, uint8_t *status)
+{
+    return bmm350_read_regs(dev, BMM350_REG_PMU_CMD_STATUS_0, status, 1U);
+}
+
 /*******************************************************************************
  * Bring-up
  ******************************************************************************/
@@ -97,6 +102,34 @@ status_t bmm350_init(bmm350_t *dev)
         return kStatus_Fail;
     }
 
+    /*
+     * Power the OTP off. Bosch's reference init does this straight after
+     * reading the compensation words, and only then measures. Without it this
+     * board read 0x7F in every data byte, with CHIP_ID correct and the bus
+     * otherwise clean - see STATUS.md section 4.1.
+     */
+    status = bmm350_write_reg(dev, BMM350_REG_OTP_CMD, BMM350_OTP_CMD_PWR_OFF_OTP);
+    if (status != kStatus_Success) {
+        return status;
+    }
+
+    /*
+     * Magnetic reset, as the reference init does it: bit reset, then
+     * flux-guide reset, both issued from suspend (where the part sits after
+     * the soft reset).
+     */
+    status = bmm350_write_reg(dev, BMM350_REG_PMU_CMD, BMM350_PMU_CMD_BR);
+    if (status != kStatus_Success) {
+        return status;
+    }
+    SDK_DelayAtLeastUs(BMM350_BR_DELAY_MS * 1000U, SystemCoreClock);
+
+    status = bmm350_write_reg(dev, BMM350_REG_PMU_CMD, BMM350_PMU_CMD_FGR);
+    if (status != kStatus_Success) {
+        return status;
+    }
+    SDK_DelayAtLeastUs(BMM350_FGR_DELAY_MS * 1000U, SystemCoreClock);
+
     /* ODR and averaging, then UPD_OAE to latch them. */
     status = bmm350_write_reg(dev, BMM350_REG_PMU_CMD_AGGR_SET, (uint8_t)(dev->odr | dev->avg));
     if (status != kStatus_Success) {
@@ -117,7 +150,7 @@ status_t bmm350_init(bmm350_t *dev)
     if (status != kStatus_Success) {
         return status;
     }
-    SDK_DelayAtLeastUs(BMM350_MODE_DELAY_MS * 1000U, SystemCoreClock);
+    SDK_DelayAtLeastUs(BMM350_NORMAL_DELAY_MS * 1000U, SystemCoreClock);
 
     return kStatus_Success;
 }

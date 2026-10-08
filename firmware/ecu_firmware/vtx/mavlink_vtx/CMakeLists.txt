@@ -16,6 +16,20 @@ include(${SdkRootDirPath}/CMakeLists.txt)
 
 include(${board}/board_files.cmake)
 
+# Project copy of the SDK linker script, so that .bss/.heap/.stack carry their
+# real load address. With the SDK's own, remoteproc refuses to start the image
+# once it grows past ~106 KB of code - see the note at the top of the copy.
+mcux_remove_armgcc_linker_script(
+    BASE_PATH ${SdkRootDirPath}
+    TARGETS debug release
+    LINKER devices/i.MX/i.MX93/MIMX9352/gcc/MIMX9352xxxxM_ram.ld
+)
+mcux_add_armgcc_linker_script(
+    BASE_PATH ${CMAKE_CURRENT_LIST_DIR}
+    TARGETS debug release
+    LINKER mcimx93evk/freertos_hello/MIMX9352_cm33_ram.ld
+)
+
 # debug_console_lite forces the signed flag off in its radix converter unless
 # this is set (fsl_debug_console.c: "#if !(PRINTF_ADVANCED_ENABLE > 0) neg = 0;"),
 # so every %d prints as unsigned and -19 comes out as 4294967277.
@@ -24,13 +38,14 @@ mcux_add_configuration(
     CX "-DPRINTF_ADVANCED_ENABLE=1"
 )
 
-# DIAGNOSTIC, enabled deliberately: run both I2C buses on the pads' internal
-# pull-ups, because the board's 3.3 V-side resistors (R58/R54 magnetometer,
-# R57/R55 barometer) are all DNP. Also drops both buses to 100 kHz, since weak
-# pull-ups cannot meet 400 kHz rise times. See the long note in pin_mux.c.
-#
-# REMOVE THIS once the resistors are populated - it is not a substitute for
-# them, and leaving it on masks a real hardware fix with a marginal bus.
+# Internal pad pull-ups on both I2C buses, in parallel with the board's 2.2k
+# (R54/R58, R55/R57 are now fitted). Also drops both buses to 100 kHz - see
+# i2c_driver.h. Measured on the magnetometer bus (LPI2C4):
+#   400 kHz, board resistors only        locked up after ~400 reads
+#   400 kHz, + internal pull-ups         locked up after ~230 reads
+#   200 kHz, + internal pull-ups         locked up after ~550 reads
+#   100 kHz, + internal pull-ups         clean
+# I2C_MASTER_BAUDRATE can override the speed from here if that is retested.
 mcux_add_configuration(
     CC "-DI2C_INTERNAL_PULLUP=1"
     CX "-DI2C_INTERNAL_PULLUP=1"
@@ -54,10 +69,12 @@ mcux_add_source(
             drivers/gpio_driver.c
             sensors/icm_42686_p.c
             sensors/bmm350.c
-            sensors/bmp581.c
             sensors/gps_m10.c
             sensors/gps_ubx.c
             comms/mavlink_min.c
+            comms/pmac_link.c
+            nav/ahrs.c
+            mcimx93evk/freertos_hello/rsc_table.c
 )
 
 mcux_add_include(
@@ -65,6 +82,7 @@ mcux_add_include(
              drivers/
              sensors/
              comms/
+             nav/
 )
 mcux_convert_binary(BINARY ${APPLICATION_BINARY_DIR}/${MCUX_SDK_PROJECT_NAME}.bin)
 
