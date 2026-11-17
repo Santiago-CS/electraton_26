@@ -1,0 +1,236 @@
+(footprint "TDK_DPX165950DT_1608_6T"
+	(version 20241229)
+	(generator "steering_wheel_fpgen")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "TDK DPX165950DT multilayer diplexer, 1.6x0.8 mm, 6 terminals (1 GND, 2 COM, 3 GND, 4 HB, 5 GND, 6 LB). Land pattern from TDK catalog values (pad 0.30x0.60, pitch 0.55): VERIFY against TDK drawing.")
+	(tags "diplexer TDK DPX165950DT")
+	(property "Reference" "REF**"
+		(at 0 -2 0)
+		(layer "F.SilkS")
+		(uuid "15af0604-7c02-52bf-b51f-49304309a99a")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "TDK_DPX165950DT_1608_6T"
+		(at 0 2 0)
+		(layer "F.Fab")
+		(uuid "c225dc71-25d6-56b7-b3c6-1f03cc96c0a2")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Footprint" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "ee296ca4-c933-5251-bb43-20a6d6a8b70f")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "1bc91141-922c-593e-98d3-86f83896069f")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "TDK DPX165950DT multilayer diplexer, 1.6x0.8 mm, 6 terminals (1 GND, 2 COM, 3 GND, 4 HB, 5 GND, 6 LB). Land pattern from TDK catalog values (pad 0.30x0.60, pitch 0.55): VERIFY against TDK drawing."
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "683d73b8-3242-5f7b-b73c-bd9d661eb5b6")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -0.64 -0.4)
+		(end 0.8 -0.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "c9146aa8-fe16-55d1-8b19-baaefe694cab")
+	)
+	(fp_line
+		(start 0.8 -0.4)
+		(end 0.8 0.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "8a5822d7-6631-594e-b888-20c5e812436c")
+	)
+	(fp_line
+		(start 0.8 0.4)
+		(end -0.8 0.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "04850dcc-f5da-52e9-8faa-676da1a82cc2")
+	)
+	(fp_line
+		(start -0.8 0.4)
+		(end -0.8 -0.24)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "0e256938-9a15-5fcb-9ab4-9c170314df73")
+	)
+	(fp_line
+		(start -0.8 -0.24)
+		(end -0.64 -0.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "19d984bc-6098-5589-9ce9-b87a07b02c79")
+	)
+	(fp_line
+		(start -0.91 -0.85)
+		(end -0.91 -1.05)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "9aa5b7cd-e7dc-59cf-a942-ae1321364c4a")
+	)
+	(fp_line
+		(start -0.91 -1.05)
+		(end -0.71 -1.05)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "5656566d-2630-5a5e-a4e2-6aefa6008686")
+	)
+	(fp_line
+		(start 0.71 -1.05)
+		(end 0.91 -1.05)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "18ac3ae3-5be2-5c44-b6ae-fbf0b20f69f2")
+	)
+	(fp_line
+		(start 0.91 -1.05)
+		(end 0.91 -0.85)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "a822f8b7-4218-5877-a1b9-a6338af9d360")
+	)
+	(fp_line
+		(start 0.91 0.85)
+		(end 0.91 1.05)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "02f74499-744f-5913-9abf-9bed18be3096")
+	)
+	(fp_line
+		(start 0.91 1.05)
+		(end 0.71 1.05)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "2df7efee-1a69-59fb-8994-23d184c723fe")
+	)
+	(fp_circle
+		(center -1.21 0.55)
+		(end -1.11 0.55)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "181bd8da-b401-530d-b554-fbee84164367")
+	)
+	(fp_rect
+		(start -1.15 -1.2)
+		(end 1.15 1.2)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "4c9c3876-c9ac-5ea7-b7c1-aebaded382b4")
+	)
+	(pad "1" smd rect
+		(at -0.55 0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "1750c802-8d7e-5d26-860b-614e07cfc415")
+	)
+	(pad "6" smd rect
+		(at -0.55 -0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "f5db89da-9268-58da-95aa-b5afec2db64a")
+	)
+	(pad "2" smd rect
+		(at 0 0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "1c5185f5-40c9-5e9d-8d0c-ff04c3cdf252")
+	)
+	(pad "5" smd rect
+		(at 0 -0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "88ee911b-35c3-57d0-bd4b-0a0636acfd21")
+	)
+	(pad "3" smd rect
+		(at 0.55 0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "96fbed59-bef3-53fa-93ad-1787ed581543")
+	)
+	(pad "4" smd rect
+		(at 0.55 -0.55)
+		(size 0.3 0.6)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "6f4b8fc2-bfff-56c8-b80e-540e64310754")
+	)
+	(embedded_fonts no)
+)

@@ -1,0 +1,12 @@
+# vtx_dashboard.py. Install into a venv next to this file, with the system's
+# site packages visible - the video uses the system GStreamer bindings (gi):
+#   python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt
+# Same libraries as the Telemetry Suite (tools/telemetry_dashboard, branch
+# tools/telemetry-gui-dashboard). The GTK ground station needs none of these.
+#
+# Qt 6.5+ also needs one system library on X11 that Ubuntu does not install by
+# default, or it aborts with 'Could not load the Qt platform plugin "xcb"':
+#   sudo apt install libxcb-cursor0
+PyQt6>=6.5.0
+pyqtgraph>=0.13.3
+numpy>=1.24.0
